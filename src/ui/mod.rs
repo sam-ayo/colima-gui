@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use gpui::*;
 use gpui_component::ActiveTheme;
+use gpui_component::spinner::Spinner;
 
 use crate::docker::containers::State;
 
@@ -61,6 +62,33 @@ pub const SNAPPY_SPRING: SpringConfig = SpringConfig::new(700., 53., 1.);
 /// move the text next to them.
 pub fn tabular_nums() -> FontFeatures {
     FontFeatures(Arc::new(vec![("tnum".into(), 1)]))
+}
+
+/// A line of monospace text that wraps in the space it gets. The wrapped
+/// rows start at the indent of the first row, so nested data keeps its
+/// shape.
+pub fn code_line(text: SharedString) -> Div {
+    let body = text.trim_start_matches([' ', '\t']);
+    let indent = text.len() - body.len();
+    let row = div().flex().flex_1().min_w_0().items_start();
+    if indent == 0 {
+        return row.child(div().flex_1().min_w_0().child(text));
+    }
+    row.child(
+        div()
+            .flex_shrink_0()
+            .whitespace_nowrap()
+            .child(SharedString::from(text[..indent].to_string())),
+    )
+    .child(div().flex_1().min_w_0().child(SharedString::from(body.to_string())))
+}
+
+/// A spinner that turns at a constant speed. The default easing of
+/// `Spinner` slows to a stop at the end of each turn. A loading `Button`
+/// also makes a default `Spinner`, unless its icon is already a spinner. Thus
+/// set `.icon(spinner())` on a button while it loads.
+pub fn spinner() -> Spinner {
+    Spinner::new().ease(linear)
 }
 
 /// Shows `el` after `SPINNER_DELAY`, then fades it in.

@@ -9,6 +9,7 @@ use gpui_component::ActiveTheme;
 
 use crate::docker::image_logo::{self, Source};
 use crate::runtime::Backend;
+use crate::ui::SNAPPY_SPRING;
 
 enum Logo {
     Loading,
@@ -81,9 +82,13 @@ fn sniff_format(bytes: &[u8]) -> Option<ImageFormat> {
     }
 }
 
+/// The opacity of the tile of a stopped container.
+const STOPPED_OPACITY: f32 = 0.55;
+
 /// A logo with a status badge. A stopped container shows a faded logo.
 #[derive(IntoElement)]
 pub struct ContainerIcon {
+    id: ElementId,
     image: String,
     icon: Option<String>,
     status: Hsla,
@@ -92,9 +97,18 @@ pub struct ContainerIcon {
 }
 
 impl ContainerIcon {
-    /// `icon` is the value of the `dev.orbstack.icon` label.
-    pub fn new(image: &str, icon: Option<&str>, status: Hsla, running: bool) -> Self {
+    /// `id` keeps the fade between the running and the stopped look. Give
+    /// the same id to the same container. `icon` is the value of the
+    /// `dev.orbstack.icon` label.
+    pub fn new(
+        id: impl Into<ElementId>,
+        image: &str,
+        icon: Option<&str>,
+        status: Hsla,
+        running: bool,
+    ) -> Self {
         ContainerIcon {
+            id: id.into(),
             image: image.to_string(),
             icon: icon.map(str::to_string),
             status,
@@ -124,7 +138,6 @@ impl RenderOnce for ContainerIcon {
             .flex()
             .items_center()
             .justify_center()
-            .when(!self.running, |d| d.opacity(0.55))
             .map(|d| match logo {
                 // A white tile for all themes, because the logos are made
                 // for a light background.
@@ -151,6 +164,14 @@ impl RenderOnce for ContainerIcon {
                     .border_2()
                     .border_color(t.background)
                     .bg(self.status),
+            )
+            // A start or a stop fades the tile to its new look. The spring
+            // starts at its target, so a row that scrolls into view does
+            // not fade.
+            .with_spring(
+                self.id,
+                SpringAnimation::new(SNAPPY_SPRING).to(if self.running { 1. } else { 0. }),
+                |d, lit: f32| d.opacity(STOPPED_OPACITY + (1. - STOPPED_OPACITY) * lit),
             )
     }
 }

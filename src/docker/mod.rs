@@ -6,7 +6,10 @@ pub mod image_logo;
 pub mod logs;
 pub mod stats;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use bollard::{API_DEFAULT_VERSION, Docker};
 
@@ -40,30 +43,21 @@ pub fn discover_socket() -> String {
     format!("unix://{}", default.display())
 }
 
-/// The Colima profile that owns the socket that the app uses. The sidebar
-/// marks this machine.
-pub fn current_profile() -> String {
-    std::env::var("DOCKER_HOST")
-        .ok()
-        .and_then(|host| profile_of(&host).map(str::to_string))
-        .unwrap_or_else(|| "default".into())
-}
-
 /// Reads "dev" from a socket such as `unix:///Users/me/.colima/dev/docker.sock`.
-fn profile_of(socket: &str) -> Option<&str> {
+/// A socket that is not in a Colima profile gives `None`.
+pub fn profile_of(socket: &str) -> Option<&str> {
     let rest = &socket[socket.find("/.colima/")? + "/.colima/".len()..];
     rest.split('/').next().filter(|p| !p.is_empty())
 }
 
-/// Connects to the engine and checks it with `ping`.
-pub async fn connect() -> (Option<Docker>, EngineStatus) {
-    let socket = discover_socket();
-    tracing::debug!(%socket, "socket found");
+/// Connects to the engine at `socket` and checks it with `ping`.
+pub async fn connect(socket: &str) -> (Option<Docker>, EngineStatus) {
+    tracing::debug!(%socket, "connect");
     let path = socket.trim_start_matches("unix://");
     if !std::path::Path::new(path).exists() {
         return (None, EngineStatus::NotRunning);
     }
-    let docker = match Docker::connect_with_unix(&socket, 30, API_DEFAULT_VERSION) {
+    let docker = match Docker::connect_with_unix(socket, 30, API_DEFAULT_VERSION) {
         Ok(d) => d,
         Err(e) => return (None, EngineStatus::Error(e.to_string())),
     };
@@ -72,6 +66,32 @@ pub async fn connect() -> (Option<Docker>, EngineStatus) {
         // A socket file that does not answer stays after the VM stops.
         Ok(Err(_)) | Err(_) => (None, EngineStatus::NotRunning),
     }
+}
+
+/// The Docker socket of one Colima profile.
+pub fn profile_socket(profile: &str) -> String {
+    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    format!("unix://{}", home.join(".colima").join(profile).join("docker.sock").display())
+}
+
+const READY_POLL: Duration = Duration::from_millis(500);
+
+/// Pings `socket` until the engine answers or until `done` is true.
+/// `colima start` finishes about 5 s after the engine answers, so the app
+/// can show the engine before the command ends. Returns true when the
+/// engine answers.
+pub async fn wait_until_ready(socket: String, done: Arc<AtomicBool>) -> bool {
+    let path = socket.trim_start_matches("unix://").to_string();
+    while !done.load(Ordering::Relaxed) {
+        if Path::new(&path).exists()
+            && let Ok(docker) = Docker::connect_with_unix(&socket, 2, API_DEFAULT_VERSION)
+            && let Ok(Ok(_)) = tokio::time::timeout(Duration::from_secs(2), docker.ping()).await
+        {
+            return true;
+        }
+        tokio::time::sleep(READY_POLL).await;
+    }
+    false
 }
 
 #[cfg(test)]
@@ -102,7 +122,7 @@ mod live_tests {
     }
 
     async fn client() -> Docker {
-        let (docker, status) = connect().await;
+        let (docker, status) = connect(&discover_socket()).await;
         assert_eq!(status, EngineStatus::Connected);
         docker.unwrap()
     }

@@ -1,6 +1,6 @@
 //! The grouped, virtualized container list.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::rc::Rc;
 
@@ -9,15 +9,17 @@ use gpui::*;
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::scroll::Scrollbar;
-use gpui_component::spinner::Spinner;
 use gpui_component::{ActiveTheme, Icon, Selectable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit_assets::IconName;
 
+use crate::docker::EngineStatus;
 use crate::docker::containers::Action;
 use crate::state::container_store::{ContainerStore, ListItem, StoreEvent, build_list};
 use crate::state::stats_store::{StatsStore, select_wanted};
 use crate::ui::native::MenuEntry;
-use crate::ui::{SNAPPY_SPRING, TOOLBAR_HEIGHT, native, text, delayed_reveal, drag_area, tabular_nums};
+use crate::ui::{
+    ENTER_DURATION, SNAPPY_SPRING, TOOLBAR_HEIGHT, delayed_reveal, drag_area, native, spinner, tabular_nums, text,
+};
 
 actions!(
     container_list,
@@ -51,6 +53,12 @@ const PORTS_WIDTH: f32 = 150.;
 const ACTIONS_WIDTH: f32 = 80.;
 /// The space between the list edge and the rounded row background.
 const ROW_INSET: f32 = 8.;
+/// The list width that a service row with all its columns needs: the
+/// indent, the icon, the name, the ports, the actions, the three gaps, the
+/// right padding, and the right inset. A narrower list hides the ports, and
+/// the names truncate. The actions always show.
+const WIDE_LIST_WIDTH: f32 = CHILD_INSET + 12. + ICON_SIZE + NAME_MIN_WIDTH + PORTS_WIDTH
+    + ACTIONS_WIDTH + 3. * 12. + 8. + ROW_INSET;
 const ROW_GROUP: &str = "container-row";
 const HEADER_GROUP: &str = "container-group";
 
@@ -73,6 +81,16 @@ pub enum ListEvent {
     Selected { id: Option<String>, pointer: bool },
 }
 
+/// How a row comes into the list.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Entrance {
+    /// The row is new in Docker. It fades in.
+    New,
+    /// The group of the row expanded. The row fades in and moves down a
+    /// small distance, out from the group row.
+    Expand,
+}
+
 pub struct ContainerList {
     store: Entity<ContainerStore>,
     stats: Entity<StatsStore>,
@@ -81,6 +99,15 @@ pub struct ContainerList {
     scroll: UniformListScrollHandle,
     collapsed: HashSet<String>,
     items: Rc<Vec<ListItem>>,
+    /// The rows that come into the list now, with the entrance and an
+    /// animation number. A row stays here for one `ENTER_DURATION` only.
+    /// A row that scrolls out and in again then does not play the
+    /// entrance again.
+    entering: HashMap<String, (Entrance, usize)>,
+    entrances: usize,
+    /// The container ids at the last rebuild. It is `None` until the first
+    /// full list arrives, so the first list does not fade in row by row.
+    known: Option<HashSet<String>>,
     selected: Option<String>,
     search_open: bool,
     /// Show only the containers that run.
@@ -88,6 +115,8 @@ pub struct ContainerList {
     /// Extra space at the left of the toolbar. The sidebar button uses this
     /// space when the sidebar is collapsed.
     leading_inset: Pixels,
+    /// True when the list is too narrow for the ports column.
+    compact: bool,
     _subs: Vec<Subscription>,
 }
 
@@ -127,10 +156,14 @@ impl ContainerList {
             scroll: UniformListScrollHandle::new(),
             collapsed: HashSet::new(),
             items: Rc::new(Vec::new()),
+            entering: HashMap::new(),
+            entrances: 0,
+            known: None,
             selected: None,
             search_open: false,
             running_only: false,
             leading_inset: px(0.),
+            compact: false,
             _subs: subs,
         };
         this.rebuild(cx);
@@ -146,6 +179,16 @@ impl ContainerList {
         cx.notify();
     }
 
+    /// Tells the list its width, so that the rows can drop the ports column
+    /// when the space is small.
+    pub fn set_width(&mut self, width: Pixels, cx: &mut Context<Self>) {
+        let compact = width < px(WIDE_LIST_WIDTH);
+        if compact != self.compact {
+            self.compact = compact;
+            cx.notify();
+        }
+    }
+
     fn rebuild(&mut self, cx: &mut Context<Self>) {
         let filter = self.search.read(cx).value();
         let store = self.store.read(cx);
@@ -156,11 +199,24 @@ impl ContainerList {
             .values()
             .filter(|r| !running_only || r.state.is_running());
         self.items = Rc::new(build_list(rows, &filter, &self.collapsed));
+        // A container that appears after the first list fades in. The
+        // engine fade covers a new connection, so it starts again.
+        let mut new = Vec::new();
+        if store.status == EngineStatus::Connected && !store.is_loading() {
+            let ids: HashSet<String> = store.set.rows.keys().cloned().collect();
+            if let Some(known) = &self.known {
+                new = ids.difference(known).cloned().collect();
+            }
+            self.known = Some(ids);
+        } else {
+            self.known = None;
+        }
         // Clear a selection that points to a removed container.
         if let Some(sel) = &self.selected
             && !store.set.rows.contains_key(sel) {
                 self.select(None, false, cx);
             }
+        self.enter(new, Entrance::New, cx);
         self.sync_stats(cx);
         cx.notify();
     }
@@ -194,10 +250,44 @@ impl ContainerList {
     }
 
     fn toggle_group(&mut self, project: &str, cx: &mut Context<Self>) {
-        if !self.collapsed.remove(project) {
+        let expanded = self.collapsed.remove(project);
+        if !expanded {
             self.collapsed.insert(project.to_string());
         }
         self.rebuild(cx);
+        // The services fade in below their group. A collapse is
+        // immediate, so the rows below move up with no wait.
+        if expanded {
+            let rows = &self.store.read(cx).set.rows;
+            let services: Vec<String> = self
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    ListItem::Row { id, grouped: true } => Some(id),
+                    _ => None,
+                })
+                .filter(|id| rows.get(*id).and_then(|r| r.compose_project.as_deref()) == Some(project))
+                .cloned()
+                .collect();
+            self.enter(services, Entrance::Expand, cx);
+        }
+    }
+
+    /// Plays an entrance on `ids`, and removes the mark when it ends.
+    fn enter(&mut self, ids: Vec<String>, entrance: Entrance, cx: &mut Context<Self>) {
+        if ids.is_empty() {
+            return;
+        }
+        self.entrances += 1;
+        let n = self.entrances;
+        for id in ids {
+            self.entering.insert(id, (entrance, n));
+        }
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(ENTER_DURATION).await;
+            let _ = this.update(cx, |this, _| this.entering.retain(|_, (_, m)| *m != n));
+        })
+        .detach();
     }
 
     fn move_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
@@ -260,6 +350,35 @@ impl ContainerList {
         cx.spawn(async move |_, cx| {
             if answer.await == Ok(1) {
                 store.update(cx, |s, cx| s.run_action(&id, Action::Remove, cx));
+            }
+        })
+        .detach();
+    }
+
+    /// Removes all the containers of a Compose project after the user
+    /// confirms, because a remove cannot be undone.
+    fn request_group_remove(&mut self, project: String, window: &mut Window, cx: &mut Context<Self>) {
+        let store = self.store.clone();
+        let count = store
+            .read(cx)
+            .set
+            .rows
+            .values()
+            .filter(|r| r.compose_project.as_deref() == Some(project.as_str()))
+            .count();
+        let noun = if count == 1 { "container" } else { "containers" };
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &format!("Remove “{project}”?"),
+            Some(&format!(
+                "The {count} {noun} of this project stop and Docker deletes them. You cannot undo this."
+            )),
+            &[PromptButton::Cancel("Cancel".into()), PromptButton::new("Remove All")],
+            cx,
+        );
+        cx.spawn(async move |_, cx| {
+            if answer.await == Ok(1) {
+                store.update(cx, |s, cx| s.run_group_action(&project, Action::Remove, cx));
             }
         })
         .detach();
@@ -345,7 +464,29 @@ impl ContainerList {
                 }
             })
             .child(item)
-            .into_any_element()
+            .map(|d| {
+                let entering = match &self.items[ix] {
+                    ListItem::Row { id, .. } => self.entering.get(id).map(|e| (id, *e)),
+                    ListItem::Group { .. } => None,
+                };
+                match entering {
+                    Some((id, (entrance, n))) => d
+                        .with_animation(
+                            ElementId::named_usize(format!("enter-{id}"), n),
+                            Animation::new(ENTER_DURATION).with_easing(ease_out_quint()),
+                            move |d, t| {
+                                let d = d.opacity(t);
+                                if entrance == Entrance::Expand {
+                                    d.top(px(-4. * (1. - t)))
+                                } else {
+                                    d
+                                }
+                            },
+                        )
+                        .into_any_element(),
+                    None => d.into_any_element(),
+                }
+            })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -496,9 +637,12 @@ impl ContainerList {
             entries.push((MenuEntry::Separator, None));
             entries.push((MenuEntry::item("Show Compose File in Finder"), None));
         }
+        entries.push((MenuEntry::Separator, None));
+        entries.push((MenuEntry::item("Remove All…"), Some(Action::Remove)));
         let (entries, actions): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
         let project = project.to_string();
-        native::show_context_menu(entries, window, cx, move |this, ix, _, cx| match actions[ix] {
+        native::show_context_menu(entries, window, cx, move |this, ix, window, cx| match actions[ix] {
+            Some(Action::Remove) => this.request_group_remove(project.clone(), window, cx),
             Some(action) => this.store.update(cx, |s, cx| s.run_group_action(&project, action, cx)),
             None => {
                 if let Some(path) = &compose_file {
@@ -600,7 +744,9 @@ impl ContainerList {
                 .gap_1()
                 .text_size(px(text::CALLOUT))
                 .text_color(t.muted_foreground)
-                .child(Spinner::new().xsmall())
+                // The label shows at once. The spinner waits, so a fast
+                // action does not show it for one frame.
+                .child(delayed_reveal(("pending", ix), div().child(spinner().xsmall())))
                 .child(action.pending_label())
                 .into_any_element(),
             None => h_flex()
@@ -658,13 +804,19 @@ impl ContainerList {
             .when(on_accent, |d| d.text_color(gpui::white()))
             .when(pending.is_some(), |d| d.opacity(0.7))
             .child(
-                super::image_icon::ContainerIcon::new(&row.image, row.icon.as_deref(), dot, running)
+                super::image_icon::ContainerIcon::new(
+                    SharedString::from(format!("icon-{id}")),
+                    &row.image,
+                    row.icon.as_deref(),
+                    dot,
+                    running,
+                )
                     .size(px(ICON_SIZE)),
             )
             .child(
                 v_flex()
                     .flex_1()
-                    .min_w(px(NAME_MIN_WIDTH))
+                    .min_w(px(if self.compact { 0. } else { NAME_MIN_WIDTH }))
                     .overflow_hidden()
                     .child(
                         div()
@@ -681,14 +833,17 @@ impl ContainerList {
                             .child(subtitle),
                     ),
             )
-            .child(
-                div()
-                    .w(px(PORTS_WIDTH))
-                    .flex_shrink_0()
-                    .when_some(row.ports.first(), |d, port| {
-                        d.child(port_link(("port", ix), port, row.ports.len() - 1, on_accent, cx))
-                    }),
-            )
+            // The Info tab of the detail pane also shows the ports.
+            .when(!self.compact, |d| {
+                d.child(
+                    div()
+                        .w(px(PORTS_WIDTH))
+                        .flex_shrink_0()
+                        .when_some(row.ports.first(), |d, port| {
+                            d.child(port_link(("port", ix), port, row.ports.len() - 1, on_accent, cx))
+                        }),
+                )
+            })
             .child(h_flex().w(px(ACTIONS_WIDTH)).flex_shrink_0().justify_end().child(actions))
             .on_click({
                 let row_id = row_id.clone();
@@ -826,7 +981,7 @@ impl Render for ContainerList {
                 .gap_2()
                 .text_color(t.muted_foreground)
                 .child(if loading {
-                    delayed_reveal("list-loading", div().child(Spinner::new())).into_any_element()
+                    delayed_reveal("list-loading", div().child(spinner())).into_any_element()
                 } else if total == 0 {
                     div().child("No containers").into_any_element()
                 } else if self.running_only && running == 0 {
@@ -898,14 +1053,17 @@ impl Render for ContainerList {
                     .border_color(t.border)
                     .child(
                         v_flex()
+                            .min_w_0()
                             .child(
                                 div()
+                                    .truncate()
                                     .text_size(px(text::TITLE3))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .child("Containers"),
                             )
                             .child(
                                 div()
+                                    .truncate()
                                     .text_size(px(text::CALLOUT))
                                     .font_features(tabular_nums())
                                     .text_color(t.muted_foreground)
@@ -915,7 +1073,9 @@ impl Render for ContainerList {
                     .child(drag_area("list-drag").flex_1().h_full())
                     .when(self.search_open, |d| {
                         d.child(
-                            div().w(px(220.)).mr_1().child(
+                            // The field gets narrower before the buttons
+                            // go out of the toolbar.
+                            div().w(px(220.)).min_w(px(120.)).mr_1().child(
                                 Input::new(&self.search)
                                     .small()
                                     .prefix(Icon::new(IconName::Search).small())

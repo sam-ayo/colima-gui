@@ -1,6 +1,8 @@
 //! The list of containers and the engine status.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use bollard::Docker;
@@ -185,16 +187,23 @@ pub fn build_list<'a>(
     out
 }
 
-type ConnectResult = (Option<Docker>, EngineStatus, Option<Vec<ContainerRow>>);
+type ConnectResult = (String, Option<Docker>, EngineStatus, Option<Vec<ContainerRow>>);
 
 /// Connects, and also loads the first list, so the rows are ready early.
-async fn connect_and_list() -> ConnectResult {
-    let (docker, status) = engine::connect().await;
+/// `None` finds the socket with `discover_socket`.
+async fn connect_and_list(socket: Option<String>) -> ConnectResult {
+    let socket = match socket {
+        Some(s) => s,
+        None => tokio::task::spawn_blocking(engine::discover_socket)
+            .await
+            .unwrap_or_default(),
+    };
+    let (docker, status) = engine::connect(&socket).await;
     let rows = match &docker {
         Some(d) => containers::list_all(d).await.ok(),
         None => None,
     };
-    (docker, status, rows)
+    (socket, docker, status, rows)
 }
 
 /// The first connection, started in `main` before GPUI initializes.
@@ -204,7 +213,7 @@ impl Global for EarlyConnect {}
 
 impl EarlyConnect {
     pub fn start(backend: &Backend) -> Self {
-        EarlyConnect(Some(backend.spawn(connect_and_list())))
+        EarlyConnect(Some(backend.spawn(connect_and_list(None))))
     }
 }
 
@@ -217,6 +226,12 @@ pub enum StoreEvent {
 }
 
 pub struct ContainerStore {
+    /// The socket of the engine. It is `None` until the first connection
+    /// finds it.
+    socket: Option<String>,
+    /// Increments when the app changes to a different engine. A result
+    /// from an older engine has an old epoch, so the store ignores it.
+    epoch: u64,
     docker: Option<Docker>,
     pub status: EngineStatus,
     pub set: ContainerSet,
@@ -235,6 +250,8 @@ impl EventEmitter<StoreEvent> for ContainerStore {}
 impl ContainerStore {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let mut this = ContainerStore {
+            socket: None,
+            epoch: 0,
             docker: None,
             status: EngineStatus::Connecting,
             set: ContainerSet::default(),
@@ -252,6 +269,34 @@ impl ContainerStore {
         self.docker.as_ref()
     }
 
+    pub fn socket(&self) -> Option<&str> {
+        self.socket.as_deref()
+    }
+
+    /// The Colima profile of the engine. The sidebar marks this machine.
+    pub fn profile(&self) -> Option<&str> {
+        self.socket.as_deref().and_then(engine::profile_of)
+    }
+
+    /// Connects to a different engine. The rows of the old engine go away.
+    pub fn switch_to(&mut self, socket: String, cx: &mut Context<Self>) {
+        if self.socket.as_deref() == Some(socket.as_str()) {
+            return;
+        }
+        self.epoch += 1;
+        self.socket = Some(socket);
+        self.docker = None;
+        // The old pump stops when its channel closes.
+        self.events_task = None;
+        self.status_task = None;
+        self.retry_task = None;
+        self.set = ContainerSet::default();
+        self.status = EngineStatus::Connecting;
+        self.loading = false;
+        self.connect(cx);
+        self.changed(cx);
+    }
+
     pub fn is_loading(&self) -> bool {
         self.loading
     }
@@ -265,22 +310,33 @@ impl ContainerStore {
         let early = cx
             .try_global::<EarlyConnect>()
             .is_some_and(|e| e.0.is_some());
-        let rx = if early {
+        // The early connection finds the default socket, so it is correct
+        // only before the first switch.
+        let rx = if early && self.socket.is_none() {
             cx.global_mut::<EarlyConnect>().0.take().unwrap()
         } else {
-            Backend::global(cx).spawn(connect_and_list())
+            Backend::global(cx).spawn(connect_and_list(self.socket.clone()))
         };
+        let epoch = self.epoch;
         cx.spawn(async move |this, cx| {
-            let Ok((docker, status, rows)) = rx.await else { return };
-            let _ = this.update(cx, |this, cx| match docker {
+            let Ok((socket, docker, status, rows)) = rx.await else { return };
+            let _ = this.update(cx, |this, cx| {
+                if this.epoch != epoch {
+                    return;
+                }
+                if this.socket.is_none() {
+                    this.socket = Some(socket);
+                }
+                match docker {
                 Some(docker) => {
                     if let Some(rows) = rows {
                         let _ = this.set.replace_all(rows);
                         this.loading = false;
                     }
-                    this.on_connected(docker, cx)
+                        this.on_connected(docker, cx)
+                    }
+                    None => this.on_down(status, cx),
                 }
-                None => this.on_down(status, cx),
             });
         })
         .detach();
@@ -317,6 +373,20 @@ impl ContainerStore {
             }
         }));
         self.changed(cx);
+    }
+
+    /// Connects now. The retry timer and the backoff of the events pump
+    /// can wait some seconds, so the app calls this when a Colima start
+    /// makes the engine answer.
+    pub fn wake(&mut self, cx: &mut Context<Self>) {
+        if self.status == EngineStatus::Connected {
+            return;
+        }
+        // The old pump stops when its channel closes.
+        self.events_task = None;
+        self.status_task = None;
+        self.retry_task = None;
+        self.connect(cx);
     }
 
     /// The engine is not available and no client exists. Try again slowly,
@@ -369,10 +439,14 @@ impl ContainerStore {
 
     fn resync(&mut self, cx: &mut Context<Self>) {
         let Some(docker) = self.docker.clone() else { return };
+        let epoch = self.epoch;
         let rx = Backend::global(cx).spawn(async move { containers::list_all(&docker).await });
         cx.spawn(async move |this, cx| {
             let Ok(result) = rx.await else { return };
             let _ = this.update(cx, |this, cx| {
+                if this.epoch != epoch {
+                    return;
+                }
                 let mut changed = std::mem::take(&mut this.loading);
                 match result {
                     Ok(rows) => {
@@ -395,12 +469,13 @@ impl ContainerStore {
     fn refresh(&mut self, id: String, cx: &mut Context<Self>) {
         let Some(docker) = self.docker.clone() else { return };
         let generation = self.set.bump(&id);
+        let epoch = self.epoch;
         let id2 = id.clone();
         let rx = Backend::global(cx).spawn(async move { containers::refresh_one(&docker, &id2).await });
         cx.spawn(async move |this, cx| {
             let Ok(Ok(row)) = rx.await else { return };
             let _ = this.update(cx, |this, cx| {
-                if this.set.apply_refresh(&id, generation, row) {
+                if this.epoch == epoch && this.set.apply_refresh(&id, generation, row) {
                     tracing::debug!(%id, "row updated");
                     this.changed(cx);
                 }
@@ -467,6 +542,8 @@ impl ContainerStore {
         }
     }
 
+    /// Starts the Colima profile of the engine, or the default profile if
+    /// the socket is not in a profile.
     pub fn start_colima(&mut self, cx: &mut Context<Self>) {
         if self.starting_colima {
             return;
@@ -474,12 +551,38 @@ impl ContainerStore {
         self.starting_colima = true;
         self.retry_task = None;
         self.changed(cx);
-        let rx = Backend::global(cx).spawn(async move {
-            tokio::task::spawn_blocking(crate::colima::start)
-                .await
-                .map_err(anyhow::Error::from)
-                .and_then(|r| r)
+        let done = Arc::new(AtomicBool::new(false));
+        let backend = Backend::global(cx);
+        let profile = self.profile().map(str::to_string);
+        let rx = backend.spawn({
+            let done = done.clone();
+            async move {
+                let result = tokio::task::spawn_blocking(move || match profile {
+                    Some(p) => crate::colima::run_action(&p, crate::colima::MachineAction::Start),
+                    None => crate::colima::start(),
+                })
+                    .await
+                    .map_err(anyhow::Error::from)
+                    .and_then(|r| r);
+                done.store(true, Ordering::Relaxed);
+                result
+            }
         });
+        // Show the containers when the engine answers, not when the command ends.
+        let socket = self.socket.clone();
+        let ready = backend.spawn(async move {
+            let socket = match socket {
+                Some(s) => s,
+                None => tokio::task::spawn_blocking(engine::discover_socket).await.ok()?,
+            };
+            Some(engine::wait_until_ready(socket, done).await)
+        });
+        cx.spawn(async move |this, cx| {
+            if ready.await == Ok(Some(true)) {
+                let _ = this.update(cx, |this, cx| this.wake(cx));
+            }
+        })
+        .detach();
         cx.spawn(async move |this, cx| {
             let result = rx.await.unwrap_or_else(|_| Err(anyhow::anyhow!("cancelled")));
             let _ = this.update(cx, |this, cx| {

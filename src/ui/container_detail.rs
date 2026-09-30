@@ -1,15 +1,12 @@
 //! The detail pane: a summary, logs, stats, and inspect data for one
 //! container.
 
-use std::ops::Range;
 use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::scroll::Scrollbar;
-use gpui_component::spinner::Spinner;
-use gpui_component::tab::{Tab, TabBar};
 use gpui_component::{ActiveTheme, Disableable as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit_assets::IconName;
 
@@ -21,10 +18,22 @@ use crate::state::container_store::{ContainerStore, StoreEvent};
 use crate::state::stats_store::StatsStore;
 use crate::ui::logs_view::LogsView;
 use crate::ui::stats_view::StatsView;
-use crate::ui::{NATIVE_BUTTON_HEIGHT, TOOLBAR_HEIGHT, text, delayed_reveal, drag_area, tabular_nums};
+use crate::ui::{
+    ENTER_DURATION, NATIVE_BUTTON_HEIGHT, SNAPPY_SPRING, TOOLBAR_HEIGHT, code_line, delayed_reveal,
+    drag_area, spinner, tabular_nums, text,
+};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum DetailTab {
+const INSPECT_LINE_HEIGHT: f32 = 18.;
+
+/// The width of each tab segment. All segments have the same width, so the
+/// selected fill can move from one segment to the next.
+const TAB_WIDTH: f32 = 68.;
+/// The space around and between the tab segments.
+const TAB_GAP: f32 = 2.;
+
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub enum DetailTab {
+    #[default]
     Info,
     Logs,
     Stats,
@@ -71,9 +80,11 @@ pub struct ContainerDetail {
     store: Entity<ContainerStore>,
     stats: Entity<StatsStore>,
     tab: DetailTab,
+    /// The number of tab changes. Each change fades in the new tab body.
+    tab_changes: usize,
     logs: Option<Entity<LogsView>>,
     inspect: Inspect,
-    inspect_scroll: UniformListScrollHandle,
+    inspect_list: ListState,
     /// The last row that this pane saw. Used to find changes.
     row: Option<ContainerRow>,
     _subs: Vec<Subscription>,
@@ -86,7 +97,8 @@ impl ContainerDetail {
         id: String,
         store: Entity<ContainerStore>,
         stats: Entity<StatsStore>,
-        _: &mut Window,
+        tab: DetailTab,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let subs = vec![
@@ -113,13 +125,21 @@ impl ContainerDetail {
             store,
             stats,
             tab: DetailTab::Info,
+            tab_changes: 0,
             logs: None,
             inspect: Inspect::Loading,
-            inspect_scroll: UniformListScrollHandle::new(),
+            inspect_list: ListState::new(0, ListAlignment::Top, px(200.)),
             _subs: subs,
         };
         this.load_inspect(cx);
+        this.set_tab(tab, window, cx);
+        // The pane has its own entrance, so the first tab does not fade.
+        this.tab_changes = 0;
         this
+    }
+
+    pub fn tab(&self) -> DetailTab {
+        self.tab
     }
 
     fn open_logs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -154,11 +174,12 @@ impl ContainerDetail {
             let result = rx.await;
             let _ = this.update(cx, |this, cx| {
                 this.inspect = match result {
-                    Ok(Ok(Details { ip, mounts, json })) => Inspect::Loaded(Rc::new(Loaded {
-                        ip,
-                        mounts,
-                        lines: Rc::new(json.lines().map(|l| SharedString::from(l.to_string())).collect()),
-                    })),
+                    Ok(Ok(Details { ip, mounts, json })) => {
+                        let lines: Vec<_> =
+                            json.lines().map(|l| SharedString::from(l.to_string())).collect();
+                        this.sync_inspect_list(lines.len());
+                        Inspect::Loaded(Rc::new(Loaded { ip, mounts, lines: Rc::new(lines) }))
+                    }
                     Ok(Err(e)) => Inspect::Failed(e.to_string()),
                     Err(_) => Inspect::Failed("cancelled".into()),
                 };
@@ -168,7 +189,27 @@ impl ContainerDetail {
         .detach();
     }
 
+    /// Gives the inspect list a new line count. A reload keeps the scroll
+    /// position, because the data changes each time the status changes.
+    fn sync_inspect_list(&mut self, count: usize) {
+        let list = &self.inspect_list;
+        let old = list.item_count();
+        if !matches!(self.inspect, Inspect::Loaded(_)) {
+            list.reset_with_uniform_height(count, px(INSPECT_LINE_HEIGHT));
+            return;
+        }
+        if count > old {
+            list.splice(old..old, count - old);
+        } else if count < old {
+            list.splice(count..old, 0);
+        }
+        list.remeasure();
+    }
+
     fn set_tab(&mut self, tab: DetailTab, window: &mut Window, cx: &mut Context<Self>) {
+        if tab != self.tab {
+            self.tab_changes += 1;
+        }
         self.tab = tab;
         if tab == DetailTab::Logs {
             self.open_logs(window, cx);
@@ -178,8 +219,12 @@ impl ContainerDetail {
 
     fn open_terminal(&mut self, cx: &mut Context<Self>) {
         let id = self.id.clone();
+        let socket = self.store.read(cx).socket().map(str::to_string);
         let rx = Backend::global(cx).spawn(async move {
-            tokio::task::spawn_blocking(move || crate::terminal::open_shell(&id, &discover_socket()))
+            tokio::task::spawn_blocking(move || {
+                let socket = socket.unwrap_or_else(discover_socket);
+                crate::terminal::open_shell(&id, &socket)
+            })
                 .await
                 .map_err(anyhow::Error::from)
                 .and_then(|r| r)
@@ -190,6 +235,89 @@ impl ContainerDetail {
             }
         })
         .detach();
+    }
+
+    /// A segmented control in the style of AppKit. The selected segment has
+    /// a raised fill, a border, and a shadow, so it is clear in the two themes.
+    ///
+    /// The selected fill moves to the segment that the user clicks. The fill
+    /// clips a copy of the labels in the selected style, so the label colors
+    /// change at the edge of the fill, not with a separate fade.
+    fn render_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = cx.theme();
+        let dark = t.is_dark();
+        let track = if dark { white().opacity(0.06) } else { black().opacity(0.06) };
+        let selected_bg = if dark { white().opacity(0.22) } else { white() };
+        let selected_border = if dark { white().opacity(0.12) } else { black().opacity(0.1) };
+        let hover_bg = if dark { white().opacity(0.08) } else { black().opacity(0.05) };
+        let fg = t.foreground;
+        let muted = t.muted_foreground;
+        let radius = t.radius;
+        let selected_ix = DetailTab::ALL.iter().position(|&tab| tab == self.tab).unwrap_or(0);
+
+        let segment = move |label: &'static str| {
+            div()
+                .w(px(TAB_WIDTH))
+                .h(px(22.))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(radius)
+                .text_size(px(text::BODY))
+                .child(label)
+        };
+
+        // A spring retargets from its current position, so a quick second
+        // click moves the fill on from where it is.
+        let indicator = div()
+            .absolute()
+            .top(px(TAB_GAP))
+            .w(px(TAB_WIDTH))
+            .h(px(22.))
+            .rounded(radius)
+            .border_1()
+            .border_color(selected_border)
+            .bg(selected_bg)
+            .shadow_xs()
+            .overflow_hidden()
+            .with_spring(
+                "detail-tab-indicator",
+                SpringAnimation::new(SNAPPY_SPRING).to(selected_ix as f32),
+                move |d, ix: f32| {
+                    let left = TAB_GAP + ix * (TAB_WIDTH + TAB_GAP);
+                    d.left(px(left)).child(
+                        h_flex()
+                            .absolute()
+                            // The border is inside the fill, so move the copy
+                            // back by its width too.
+                            .top(px(-1.))
+                            .left(px(TAB_GAP - left - 1.))
+                            .gap(px(TAB_GAP))
+                            .text_color(fg)
+                            .font_weight(FontWeight::MEDIUM)
+                            .children(DetailTab::ALL.map(|tab| segment(tab.label()))),
+                    )
+                },
+            );
+
+        h_flex()
+            .id("detail-tabs")
+            .relative()
+            .p(px(TAB_GAP))
+            .gap(px(TAB_GAP))
+            .rounded(radius + px(TAB_GAP))
+            .bg(track)
+            .children(DetailTab::ALL.map(|tab| {
+                segment(tab.label())
+                    .id(tab.label())
+                    .text_color(muted)
+                    .when(tab != self.tab, |d| {
+                        d.cursor_pointer().hover(|s| s.bg(hover_bg).text_color(fg))
+                    })
+                    .on_click(cx.listener(move |this, _, window, cx| this.set_tab(tab, window, cx)))
+            }))
+            .child(indicator)
     }
 
     fn render_inspect(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -208,22 +336,22 @@ impl ContainerDetail {
                     .size_full()
                     .font_family(t.mono_font_family.clone())
                     .text_size(px(text::SUBHEADLINE))
+                    .line_height(px(INSPECT_LINE_HEIGHT))
                     .child(
-                        uniform_list("inspect", lines.len(), move |range: Range<usize>, _, _| {
-                            range
-                                .map(|ix| {
-                                    div()
-                                        .h(px(18.))
-                                        .px_5()
-                                        .whitespace_nowrap()
-                                        .child(lines[ix].clone())
-                                })
-                                .collect::<Vec<_>>()
+                        list(self.inspect_list.clone(), move |ix, _, _| {
+                            match lines.get(ix) {
+                                Some(line) => div()
+                                    .flex()
+                                    .w_full()
+                                    .px_5()
+                                    .child(code_line(line.clone()))
+                                    .into_any_element(),
+                                None => div().into_any_element(),
+                            }
                         })
-                        .size_full()
-                        .track_scroll(&self.inspect_scroll),
+                        .size_full(),
                     )
-                    .child(Scrollbar::vertical(&self.inspect_scroll))
+                    .child(Scrollbar::vertical(&self.inspect_list))
                     .into_any_element()
             }
         }
@@ -350,6 +478,7 @@ impl ContainerDetail {
                     .h(px(NATIVE_BUTTON_HEIGHT))
                     .flex_1()
                     .icon(Icon::new(restart.0))
+                    .when(pending, |b| b.icon(spinner()))
                     .label(restart.1)
                     .loading(pending)
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -379,7 +508,7 @@ fn loading(id: &'static str) -> AnyElement {
         .size_full()
         .items_center()
         .justify_center()
-        .child(delayed_reveal(id, div().child(Spinner::new())))
+        .child(delayed_reveal(id, div().child(spinner())))
         .into_any_element()
 }
 
@@ -490,7 +619,6 @@ impl Render for ContainerDetail {
         let t = cx.theme().clone();
         let store = self.store.read(cx);
         let row = store.set.rows.get(&self.id).cloned();
-        let tab_ix = DetailTab::ALL.iter().position(|t| *t == self.tab).unwrap_or(0);
 
         let body = match (self.tab, &row) {
             (DetailTab::Info, Some(row)) => self.render_info(row, cx),
@@ -512,6 +640,22 @@ impl Render for ContainerDetail {
             }
             (DetailTab::Inspect, _) => self.render_inspect(cx),
         };
+        // Fade in the new tab body, so it does not replace the old one in a
+        // single frame. Opacity only: the user reads this content, so it
+        // does not move.
+        let body = if self.tab_changes > 0 {
+            div()
+                .size_full()
+                .child(body)
+                .with_animation(
+                    ("detail-tab-fade", self.tab_changes),
+                    Animation::new(ENTER_DURATION).with_easing(ease_out_quint()),
+                    |d, t| d.opacity(t),
+                )
+                .into_any_element()
+        } else {
+            body
+        };
 
         let header = row.as_ref().map(|r| {
             let subtitle = match &r.compose_project {
@@ -529,6 +673,7 @@ impl Render for ContainerDetail {
                 .gap_3()
                 .child(
                     super::image_icon::ContainerIcon::new(
+                        SharedString::from(format!("detail-icon-{}", r.id)),
                         &r.image,
                         r.icon.as_deref(),
                         super::state_color(r.state, cx),
@@ -579,14 +724,7 @@ impl Render for ContainerDetail {
                     .px_3()
                     .child(drag_area("detail-drag-left").flex_1().h_full())
                     .child(
-                        TabBar::new("detail-tabs")
-                            .segmented()
-                            .small()
-                            .selected_index(tab_ix)
-                            .children(DetailTab::ALL.map(|tab| Tab::new().label(tab.label()).px_3()))
-                            .on_click(cx.listener(|this, ix: &usize, window, cx| {
-                                this.set_tab(DetailTab::ALL[*ix], window, cx)
-                            })),
+                        self.render_tabs(cx),
                     )
                     .child(drag_area("detail-drag-right").flex_1().h_full())
                     .child(

@@ -6,12 +6,10 @@ use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
-use gpui_component::button::{Button, ButtonVariants as _};
-use gpui_component::spinner::Spinner;
 use gpui_component::{ActiveTheme, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit_assets::IconName;
 
-use super::{SIDEBAR_INSET, SIDEBAR_RADIUS, TOOLBAR_HEIGHT, drag_area, native, text};
+use super::{SIDEBAR_INSET, SIDEBAR_RADIUS, TOOLBAR_HEIGHT, drag_area, native, spinner, text};
 use crate::colima::Machine;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -62,7 +60,7 @@ impl Section {
 }
 
 type SelectHandler = Rc<dyn Fn(Section, &mut Window, &mut App)>;
-type ToggleHandler = Rc<dyn Fn(&str, &mut Window, &mut App)>;
+type MachineHandler = Rc<dyn Fn(&str, &mut Window, &mut App)>;
 
 #[derive(IntoElement)]
 pub struct Sidebar {
@@ -73,7 +71,8 @@ pub struct Sidebar {
     /// The profile that the app connects to.
     current: String,
     on_select: SelectHandler,
-    on_toggle: ToggleHandler,
+    on_open: MachineHandler,
+    on_menu: MachineHandler,
 }
 
 impl Sidebar {
@@ -89,7 +88,8 @@ impl Sidebar {
             busy: HashSet::new(),
             current: String::new(),
             on_select: Rc::new(on_select),
-            on_toggle: Rc::new(|_, _, _| {}),
+            on_open: Rc::new(|_, _, _| {}),
+            on_menu: Rc::new(|_, _, _| {}),
         }
     }
 
@@ -98,12 +98,14 @@ impl Sidebar {
         machines: Vec<Machine>,
         busy: HashSet<String>,
         current: String,
-        on_toggle: impl Fn(&str, &mut Window, &mut App) + 'static,
+        on_open: impl Fn(&str, &mut Window, &mut App) + 'static,
+        on_menu: impl Fn(&str, &mut Window, &mut App) + 'static,
     ) -> Self {
         self.machines = machines;
         self.busy = busy;
         self.current = current;
-        self.on_toggle = Rc::new(on_toggle);
+        self.on_open = Rc::new(on_open);
+        self.on_menu = Rc::new(on_menu);
         self
     }
 
@@ -159,20 +161,19 @@ impl Sidebar {
         let running = machine.is_running();
         let busy = self.busy.contains(&machine.name);
         let current = machine.name == self.current;
-        let on_toggle = self.on_toggle.clone();
-        let name = machine.name.clone();
-        let power = Button::new(("power", ix))
-            .icon(Icon::new(IconName::Power))
-            .ghost()
-            .xsmall()
-            .tooltip(if running { "Stop the machine" } else { "Start the machine" })
-            .on_click(move |_, window, cx| {
-                cx.stop_propagation();
-                on_toggle(&name, window, cx)
-            });
-        let group: SharedString = format!("machine-{ix}").into();
+        // A running machine has the accent color, as the section icons
+        // have. A stopped machine is gray.
+        let color = if running { native::accent(cx) } else { t.muted_foreground };
+        let on_open = self.on_open.clone();
+        let on_menu = self.on_menu.clone();
+        let open_name = machine.name.clone();
+        let menu_name = machine.name.clone();
         Self::item(("machine", ix), current, cx)
-            .group(group.clone())
+            // A click on the row shows the containers of this machine. A
+            // right click shows the machine actions.
+            .on_click(move |_, window, cx| on_open(&open_name, window, cx))
+            .on_mouse_down(MouseButton::Right, move |_, window, cx| on_menu(&menu_name, window, cx))
+            .child(Icon::new(IconName::Server).small().text_color(color))
             .child(
                 div()
                     .flex_1()
@@ -181,37 +182,7 @@ impl Sidebar {
                     .when(!running, |d| d.text_color(t.muted_foreground))
                     .child(machine.name.clone()),
             )
-            .map(|d| {
-                if busy {
-                    d.child(Spinner::new().xsmall().color(t.muted_foreground))
-                } else if running {
-                    d.child(power)
-                } else {
-                    // "off" changes to the power button on hover.
-                    d.child(
-                        div()
-                            .relative()
-                            .flex()
-                            .justify_end()
-                            .child(
-                                div()
-                                    .text_size(px(text::SUBHEADLINE))
-                                    .text_color(t.muted_foreground)
-                                    .group_hover(group.clone(), |s| s.invisible())
-                                    .child("off"),
-                            )
-                            .child(
-                                div()
-                                    .absolute()
-                                    .right_0()
-                                    .top(px(-4.))
-                                    .invisible()
-                                    .group_hover(group, |s| s.visible())
-                                    .child(power),
-                            ),
-                    )
-                }
-            })
+            .when(busy, |d| d.child(spinner().xsmall().color(t.muted_foreground)))
     }
 }
 

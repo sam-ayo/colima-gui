@@ -68,14 +68,21 @@ impl LogBuffer {
         line.text.to_lowercase().contains(filter)
     }
 
-    pub fn extend(&mut self, batch: impl IntoIterator<Item = LogLine>) {
+    /// Adds lines at the end. Returns the number of visible lines that the
+    /// buffer removed from the front to make space.
+    pub fn extend(&mut self, batch: impl IntoIterator<Item = LogLine>) -> usize {
+        let mut removed = 0;
         for line in batch {
             if self.lines.len() == self.capacity {
                 self.lines.pop_front();
                 self.first_seq += 1;
                 self.evicted += 1;
+                if !self.is_filtered() {
+                    removed += 1;
+                }
                 while self.matches.front().is_some_and(|s| *s < self.first_seq) {
                     self.matches.pop_front();
+                    removed += 1;
                 }
             }
             let seq = self.first_seq + self.lines.len() as u64;
@@ -84,6 +91,7 @@ impl LogBuffer {
             }
             self.lines.push_back(line);
         }
+        removed
     }
 
     pub fn set_filter(&mut self, filter: &str) {
@@ -124,7 +132,8 @@ mod tests {
     #[test]
     fn stops_at_capacity_and_evicts_oldest() {
         let mut b = LogBuffer::new();
-        b.extend((1..=200_000).map(|i| line(&i.to_string())));
+        let removed = b.extend((1..=200_000).map(|i| line(&i.to_string())));
+        assert_eq!(removed, 150_000);
         assert_eq!(b.len(), MAX_LINES);
         assert_eq!(b.evicted, 150_000);
         assert_eq!(b.visible_line(0).unwrap().text, "150001");
@@ -139,8 +148,9 @@ mod tests {
         b.set_filter("ERR");
         assert_eq!(b.visible_len(), 2);
         assert_eq!(b.visible_line(1).unwrap().text, "c err");
-        // Two new lines remove "a err" and "b" from the front.
-        b.extend(["e err", "f"].map(line));
+        // Two new lines remove "a err" and "b" from the front. Only "a err"
+        // was visible.
+        assert_eq!(b.extend(["e err", "f"].map(line)), 1);
         assert_eq!(b.len(), 4);
         let texts: Vec<_> = (0..b.visible_len())
             .map(|i| b.visible_line(i).unwrap().text.clone())

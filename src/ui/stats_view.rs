@@ -149,11 +149,5 @@ impl RenderOnce for StatsView {
                 graph(mem, mem_max, t.green, t.border.opacity(0.6)),
                 cx,
             ))
-            .child(
-                div()
-                    .text_size(px(text::SUBHEADLINE))
-                    .text_color(t.muted_foreground)
-                    .child("The last 60 seconds. One sample each second."),
-            )
     }
 }

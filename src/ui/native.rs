@@ -6,6 +6,7 @@
 
 use gpui::*;
 use gpui_component::{Theme, input};
+use serde::Deserialize;
 
 use super::text;
 
@@ -29,25 +30,86 @@ actions!(
 /// bundle.
 pub const APP_NAME: &str = "Colima";
 
+/// The accent colors that the View menu gives. `System` follows the accent
+/// color in System Settings. The app keeps the choice between launches.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+pub enum AccentColor {
+    System,
+    #[default]
+    Purple,
+    Pink,
+    Orange,
+    Green,
+    Teal,
+    Blue,
+}
+
+impl AccentColor {
+    const COLORS: [AccentColor; 6] = [
+        AccentColor::Purple,
+        AccentColor::Pink,
+        AccentColor::Orange,
+        AccentColor::Green,
+        AccentColor::Teal,
+        AccentColor::Blue,
+    ];
+
+    /// The menu label. The saved setting also uses it.
+    fn name(self) -> &'static str {
+        match self {
+            AccentColor::System => "System",
+            AccentColor::Purple => "Purple",
+            AccentColor::Pink => "Pink",
+            AccentColor::Orange => "Orange",
+            AccentColor::Green => "Green",
+            AccentColor::Teal => "Teal",
+            AccentColor::Blue => "Blue",
+        }
+    }
+
+    fn from_name(name: &str) -> Option<Self> {
+        std::iter::once(AccentColor::System)
+            .chain(Self::COLORS)
+            .find(|c| c.name() == name)
+    }
+}
+
+impl Global for AccentColor {}
+
+/// Changes the accent color and saves the choice.
+#[derive(Action, Clone, PartialEq, Deserialize)]
+#[action(namespace = native, no_json)]
+pub struct SetAccentColor(AccentColor);
+
 /// Sets the theme from the appearance of `window`, then puts the system
-/// colors on it. Call it again when the appearance or the accent color
-/// changes.
+/// colors and the chosen accent color on it. Call it again when the
+/// appearance or the accent color changes.
 pub fn sync_theme(window: &mut Window, cx: &mut App) {
     Theme::sync_system_appearance(Some(window), cx);
     let dark = matches!(
         window.appearance(),
         WindowAppearance::Dark | WindowAppearance::VibrantDark
     );
-    let Some(c) = platform::system_colors(dark) else {
+    let choice = cx.try_global::<AccentColor>().copied().unwrap_or_default();
+    let Some(c) = platform::system_colors(dark, choice) else {
         return;
     };
+    let s = Surfaces::new(c.accent, dark);
     Theme::update(cx, |t| {
         // The components size their text in rems, and most of them use
         // `text_sm`, which is 0.875 rem. This rem size makes that text 13 pt,
         // the body size of macOS.
         t.font_size = px(text::BODY / 0.875);
         t.mono_font_size = px(text::CALLOUT);
-        t.background = c.content_background;
+        t.background = s.background;
+        t.colors.list = s.background;
+        t.table = s.background;
+        t.title_bar = s.background;
+        t.sidebar = s.sidebar;
+        t.sidebar_border = s.sidebar_border;
+        t.sidebar_accent = s.selection;
+        t.muted = s.muted;
+        t.popover = s.popover;
         t.foreground = c.label;
         t.muted_foreground = c.secondary_label;
         t.border = c.separator;
@@ -79,12 +141,50 @@ pub fn sync_theme(window: &mut Window, cx: &mut App) {
     cx.set_global(SystemAccent {
         accent: c.accent,
         selection: c.selection,
-        unemphasized_selection: c.unemphasized_selection,
+        unemphasized_selection: s.selection,
     });
 }
 
-/// The colors that follow the accent color of the system and that the
-/// theme has no field for.
+/// The fills of the window, the sidebar, and the tiles. Pure white and pure
+/// black look flat, so each fill has a small tint of the accent hue. A gray
+/// accent, such as Graphite, gives neutral grays.
+struct Surfaces {
+    background: Hsla,
+    sidebar: Hsla,
+    sidebar_border: Hsla,
+    muted: Hsla,
+    popover: Hsla,
+    /// The fill of a selected row when the list has no focus.
+    selection: Hsla,
+}
+
+impl Surfaces {
+    fn new(accent: Hsla, dark: bool) -> Self {
+        let tint = |s: f32, l: f32| hsla(accent.h, s * accent.s.min(1.), l, 1.);
+        if dark {
+            Surfaces {
+                background: tint(0.14, 0.135),
+                sidebar: tint(0.18, 0.175),
+                sidebar_border: tint(0.18, 0.24),
+                muted: tint(0.14, 0.22),
+                popover: tint(0.14, 0.17),
+                selection: tint(0.20, 0.25),
+            }
+        } else {
+            Surfaces {
+                background: tint(0.30, 0.975),
+                sidebar: tint(0.32, 0.935),
+                sidebar_border: tint(0.24, 0.88),
+                muted: tint(0.26, 0.915),
+                popover: tint(0.30, 0.985),
+                selection: tint(0.30, 0.87),
+            }
+        }
+    }
+}
+
+/// The colors that follow the accent color and that the theme has no
+/// field for.
 pub struct SystemAccent {
     pub accent: Hsla,
     /// The fill of a selected row in a list that has the focus.
@@ -95,7 +195,7 @@ pub struct SystemAccent {
 
 impl Global for SystemAccent {}
 
-/// The accent color of the system, or the theme blue on other platforms.
+/// The chosen accent color, or the theme blue on other platforms.
 pub fn accent(cx: &App) -> Hsla {
     cx.try_global::<SystemAccent>()
         .map(|a| a.accent)
@@ -137,12 +237,8 @@ pub fn autosave_frame(window: &Window, cx: &App) {
 }
 
 /// Adds the standard macOS menus, and the key bindings that go with them.
+/// Also reads the saved accent color.
 pub fn init_menus(cx: &mut App) {
-    use crate::ui::app_view::ToggleSidebar;
-    use crate::ui::container_list::{
-        FocusSearch, RemoveSelected, RestartSelected, StartSelected, StopSelected, ToggleRunningOnly,
-    };
-
     cx.bind_keys([
         KeyBinding::new("cmd-q", Quit, None),
         KeyBinding::new("cmd-h", Hide, None),
@@ -159,6 +255,37 @@ pub fn init_menus(cx: &mut App) {
     cx.on_action(|_: &CloseWindow, cx| with_active_window(cx, |w, _| w.remove_window()));
     cx.on_action(|_: &Minimize, cx| with_active_window(cx, |w, _| w.minimize_window()));
     cx.on_action(|_: &Zoom, cx| with_active_window(cx, |w, _| w.zoom_window()));
+    cx.on_action(|a: &SetAccentColor, cx| {
+        platform::save_accent(a.0.name());
+        cx.set_global(a.0);
+        // The check mark moves to the new color.
+        set_menus(cx);
+        // A menu action can come while GPUI updates the active window, and
+        // that window then cannot update again. Change the theme after the
+        // current update.
+        cx.defer(|cx| {
+            for handle in cx.windows() {
+                let _ = handle.update(cx, |_, window, cx| sync_theme(window, cx));
+            }
+            cx.refresh_windows();
+        });
+    });
+
+    let saved = platform::saved_accent().and_then(|name| AccentColor::from_name(&name));
+    cx.set_global(saved.unwrap_or_default());
+    set_menus(cx);
+}
+
+fn set_menus(cx: &mut App) {
+    use crate::ui::app_view::ToggleSidebar;
+    use crate::ui::container_list::{
+        FocusSearch, RemoveSelected, RestartSelected, StartSelected, StopSelected, ToggleRunningOnly,
+    };
+
+    let current = cx.try_global::<AccentColor>().copied().unwrap_or_default();
+    let accent_item = |c: AccentColor| MenuItem::action(c.name(), SetAccentColor(c)).checked(c == current);
+    let mut accent_items = vec![accent_item(AccentColor::System), MenuItem::separator()];
+    accent_items.extend(AccentColor::COLORS.map(accent_item));
 
     cx.set_menus([
         Menu::new(APP_NAME).items([
@@ -187,6 +314,8 @@ pub fn init_menus(cx: &mut App) {
         Menu::new("View").items([
             MenuItem::action("Toggle Sidebar", ToggleSidebar),
             MenuItem::action("Show Running Containers Only", ToggleRunningOnly),
+            MenuItem::separator(),
+            MenuItem::submenu(Menu::new("Accent Color").items(accent_items)),
             // AppKit adds "Enter Full Screen" to this menu.
         ]),
         Menu::new("Container").items([
@@ -252,10 +381,8 @@ struct SystemColors {
     label: Hsla,
     secondary_label: Hsla,
     separator: Hsla,
-    content_background: Hsla,
     accent: Hsla,
     selection: Hsla,
-    unemphasized_selection: Hsla,
     text_selection: Hsla,
     link: Hsla,
     blue: Hsla,
@@ -277,7 +404,7 @@ mod platform {
         NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication, NSColor, NSColorSpace,
         NSEvent, NSMenu, NSMenuItem, NSView,
     };
-    use objc2_foundation::{NSDictionary, NSObject, NSString};
+    use objc2_foundation::{NSDictionary, NSObject, NSString, NSUserDefaults};
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
     use super::*;
@@ -292,7 +419,37 @@ mod platform {
         Rgba { r: r as f32, g: g as f32, b: b as f32, a: a as f32 }.into()
     }
 
-    pub(super) fn system_colors(dark: bool) -> Option<SystemColors> {
+    /// The key of the saved accent color in the user defaults.
+    const ACCENT_KEY: &str = "AccentColor";
+
+    pub(super) fn saved_accent() -> Option<String> {
+        let key = NSString::from_str(ACCENT_KEY);
+        Some(NSUserDefaults::standardUserDefaults().stringForKey(&key)?.to_string())
+    }
+
+    pub(super) fn save_accent(name: &str) {
+        let key = NSString::from_str(ACCENT_KEY);
+        let value = NSString::from_str(name);
+        // SAFETY: a string is a property list value, so the defaults can
+        // keep it.
+        unsafe { NSUserDefaults::standardUserDefaults().setObject_forKey(Some(&value), &key) };
+    }
+
+    /// The system color of an accent color choice. `System` has no color
+    /// here, because it uses the accent colors of AppKit.
+    fn accent_color(choice: AccentColor) -> Option<Retained<NSColor>> {
+        Some(match choice {
+            AccentColor::System => return None,
+            AccentColor::Purple => NSColor::systemPurpleColor(),
+            AccentColor::Pink => NSColor::systemPinkColor(),
+            AccentColor::Orange => NSColor::systemOrangeColor(),
+            AccentColor::Green => NSColor::systemGreenColor(),
+            AccentColor::Teal => NSColor::systemTealColor(),
+            AccentColor::Blue => NSColor::systemBlueColor(),
+        })
+    }
+
+    pub(super) fn system_colors(dark: bool, choice: AccentColor) -> Option<SystemColors> {
         let name = unsafe {
             if dark { NSAppearanceNameDarkAqua } else { NSAppearanceNameAqua }
         };
@@ -300,16 +457,29 @@ mod platform {
         // The dynamic colors resolve for the current drawing appearance.
         let out = Cell::new(None);
         let block = RcBlock::new(|| {
+            // The system colors have a light and a dark variant. A chosen
+            // color also fills the selected rows, the text selection, and
+            // the links.
+            let (accent, selection, text_selection, link) = match accent_color(choice) {
+                Some(color) => {
+                    let accent = hsla(&color);
+                    (accent, accent, accent.opacity(if dark { 0.45 } else { 0.3 }), accent)
+                }
+                None => (
+                    hsla(&NSColor::controlAccentColor()),
+                    hsla(&NSColor::selectedContentBackgroundColor()),
+                    hsla(&NSColor::selectedTextBackgroundColor()),
+                    hsla(&NSColor::linkColor()),
+                ),
+            };
             out.set(Some(SystemColors {
                 label: hsla(&NSColor::labelColor()),
                 secondary_label: hsla(&NSColor::secondaryLabelColor()),
                 separator: hsla(&NSColor::separatorColor()),
-                content_background: hsla(&NSColor::controlBackgroundColor()),
-                accent: hsla(&NSColor::controlAccentColor()),
-                selection: hsla(&NSColor::selectedContentBackgroundColor()),
-                unemphasized_selection: hsla(&NSColor::unemphasizedSelectedContentBackgroundColor()),
-                text_selection: hsla(&NSColor::selectedTextBackgroundColor()),
-                link: hsla(&NSColor::linkColor()),
+                accent,
+                selection,
+                text_selection,
+                link,
                 blue: hsla(&NSColor::systemBlueColor()),
                 green: hsla(&NSColor::systemGreenColor()),
                 red: hsla(&NSColor::systemRedColor()),
@@ -422,9 +592,13 @@ mod platform {
 mod platform {
     use super::*;
 
-    pub(super) fn system_colors(_: bool) -> Option<SystemColors> {
+    pub(super) fn system_colors(_: bool, _: AccentColor) -> Option<SystemColors> {
         None
     }
+    pub(super) fn saved_accent() -> Option<String> {
+        None
+    }
+    pub(super) fn save_accent(_: &str) {}
     pub(super) fn autosave_frame(_: &Window, _: &'static str, _: &App) {}
     pub(super) fn show_about_panel(_: &str, _: &str) {}
     pub(super) fn pop_up_menu(_: &[MenuEntry]) -> Option<usize> {

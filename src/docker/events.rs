@@ -30,10 +30,10 @@ impl EngineEvent {
 }
 
 const MIN_BACKOFF: Duration = Duration::from_millis(500);
-const MAX_BACKOFF: Duration = Duration::from_secs(5);
+const MAX_BACKOFF: Duration = Duration::from_secs(2);
 
 /// Reads container events until `tx` closes. If the stream ends, it connects
-/// again with backoff (0.5 s to 5 s) and sends `Resync`.
+/// again with backoff (0.5 s to 2 s) and sends `Resync`.
 pub async fn pump(docker: Docker, tx: async_channel::Sender<EngineEvent>) {
     let mut backoff = MIN_BACKOFF;
     let mut connected = true;
