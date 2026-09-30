@@ -1,6 +1,7 @@
 //! Container list and actions.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use anyhow::Result;
 use bollard::Docker;
@@ -101,6 +102,43 @@ impl ContainerRow {
         }
         (s.into(), None)
     }
+
+    /// The time since the container exited, from a status such as "Exited
+    /// (0) 2 hours ago". Docker writes the time in words, so the value is
+    /// approximate. It is `None` for a container that did not exit.
+    pub fn exited_ago(&self) -> Option<Duration> {
+        let (head, time) = self.status_parts();
+        if !head.starts_with("Exited") {
+            return None;
+        }
+        parse_ago(&time?)
+    }
+}
+
+/// Reads a Docker time such as "2 hours ago", "About a minute ago", or
+/// "Less than a second ago".
+fn parse_ago(s: &str) -> Option<Duration> {
+    let s = s.strip_suffix(" ago")?;
+    if s.starts_with("Less than") {
+        return Some(Duration::ZERO);
+    }
+    let (count, unit) = s.split_once(' ')?;
+    let count = match count {
+        "About" | "a" | "an" => 1,
+        n => n.parse().ok()?,
+    };
+    let unit = unit.trim_start_matches("a ").trim_start_matches("an ");
+    let secs = match unit.trim_end_matches('s') {
+        "second" => 1,
+        "minute" => 60,
+        "hour" => 3_600,
+        "day" => 86_400,
+        "week" => 604_800,
+        "month" => 2_592_000,
+        "year" => 31_536_000,
+        _ => return None,
+    };
+    Some(Duration::from_secs(count * secs))
 }
 
 /// Reads the code from an "Exited (N) …" status.
@@ -337,6 +375,21 @@ mod tests {
         row.state = State::Created;
         row.status = "Created".into();
         assert_eq!(row.status_parts(), ("Created".into(), None));
+        assert_eq!(row.exited_ago(), None);
+    }
+
+    #[test]
+    fn exit_time_reads_docker_words() {
+        let ago = |s: &str| parse_ago(s).map(|d| d.as_secs());
+        assert_eq!(ago("Less than a second ago"), Some(0));
+        assert_eq!(ago("45 seconds ago"), Some(45));
+        assert_eq!(ago("About a minute ago"), Some(60));
+        assert_eq!(ago("4 minutes ago"), Some(240));
+        assert_eq!(ago("About an hour ago"), Some(3_600));
+        assert_eq!(ago("2 hours ago"), Some(7_200));
+        assert_eq!(ago("3 days ago"), Some(259_200));
+        assert_eq!(ago("2 weeks ago"), Some(1_209_600));
+        assert_eq!(ago("soon"), None);
     }
 
     #[test]

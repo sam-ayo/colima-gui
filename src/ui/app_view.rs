@@ -2,7 +2,7 @@
 
 use std::cell::Cell;
 use std::rc::Rc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
@@ -53,9 +53,6 @@ const DETAIL_DEFAULT_FRACTION: f32 = 0.36;
 /// actions still show. The minimum window width leaves this space next to
 /// the smallest sidebar and detail pane.
 const LIST_MIN_WIDTH: f32 = 320.;
-/// The time for the detail pane to go out. An exit is shorter than an
-/// entrance, because the user does not look at the pane that goes.
-const DETAIL_EXIT_DURATION: Duration = Duration::from_millis(120);
 /// The width of the resize handle at the left edge of the detail pane.
 const DETAIL_HANDLE_WIDTH: f32 = 6.;
 /// The spring that opens and collapses the sidebar. It is critically
@@ -64,6 +61,10 @@ const DETAIL_HANDLE_WIDTH: f32 = 6.;
 const SIDEBAR_SPRING: SpringConfig = SpringConfig::new(400., 40., 1.);
 /// The spring is at rest when it is nearer than this to the target.
 const SIDEBAR_SPRING_EPSILON: f32 = 0.5;
+/// The detail pane opens and closes on the sidebar spring, so the two
+/// panels move the same way. The spring moves a part of the pane width,
+/// from 0 to 1. This value is about half a pixel of a pane.
+const DETAIL_SPRING_EPSILON: f32 = 0.001;
 
 pub fn bind_keys(cx: &mut App) {
     // The standard macOS shortcut for "Show Sidebar" and "Hide Sidebar".
@@ -100,10 +101,15 @@ pub struct AppView {
     machines: Entity<MachineStore>,
     list: Entity<ContainerList>,
     detail: Option<Entity<ContainerDetail>>,
-    /// The detail pane that goes out after a click on its close button,
-    /// with the number of its exit. The list gets the space when it ends.
-    closing_detail: Option<(Entity<ContainerDetail>, usize)>,
-    detail_closes: usize,
+    /// The detail pane that goes out after a click on its close button.
+    /// It stays until the spring closes it.
+    closing_detail: Option<Entity<ContainerDetail>>,
+    /// The part of the detail pane width that shows, from 0 to 1, and its
+    /// speed. The list gets the space that the pane does not use.
+    detail_spring: SpringState,
+    /// The time of the last spring step, or `None` when the spring is at
+    /// rest.
+    detail_stepped_at: Option<Instant>,
     section: Section,
     /// The width of the sidebar panel that the user set, without the inset
     /// around it. A narrow window can show the panel narrower.
@@ -122,12 +128,6 @@ pub struct AppView {
     /// first resize, and the pane then uses a part of the main area. A
     /// narrow main area can show the pane narrower.
     detail_width: Option<Pixels>,
-    /// Counts the times that the detail pane opened. Each open gets a new
-    /// animation id, so the entrance plays one time for each open.
-    detail_opens: usize,
-    /// True when a pointer opened the detail pane. A pane that a key opens
-    /// shows immediately, because keys are fast and frequent.
-    detail_animated: bool,
     /// The engine status at the last change, and the number of changes.
     /// Each change gets a new animation id, so the main area fades one time.
     engine_status: EngineStatus,
@@ -203,7 +203,8 @@ impl AppView {
             list,
             detail: None,
             closing_detail: None,
-            detail_closes: 0,
+            detail_spring: SpringState { position: 0., velocity: 0. },
+            detail_stepped_at: None,
             section: Section::Containers,
             sidebar_width: px(SIDEBAR_WIDTH),
             sidebar_collapsed: false,
@@ -214,8 +215,6 @@ impl AppView {
             sidebar_stepped_at: None,
             sidebar_follows_pointer: false,
             detail_width: None,
-            detail_opens: 0,
-            detail_animated: false,
             engine_status: EngineStatus::Connecting,
             engine_changes: 0,
             _subs: subs,
@@ -316,6 +315,35 @@ impl AppView {
             self.list.update(cx, |l, cx| l.set_leading_inset(inset, cx));
         }
         width
+    }
+
+    /// Moves the detail spring one frame toward the target, and returns
+    /// the part of the pane width that shows in this frame. At the end of
+    /// a close, the pane that goes out is dropped.
+    fn step_detail(&mut self, window: &mut Window, cx: &App) -> f32 {
+        let target = if self.detail.is_some() { 1. } else { 0. };
+        let now = Instant::now();
+        let spring = &mut self.detail_spring;
+        if cx.reduce_motion() {
+            *spring = SpringState { position: target, velocity: 0. };
+        } else if spring.position != target || spring.velocity != 0. {
+            let elapsed = self
+                .detail_stepped_at
+                .map_or(0., |at| now.duration_since(at).as_secs_f32());
+            *spring = SIDEBAR_SPRING.step(*spring, target, elapsed);
+            if SIDEBAR_SPRING.is_settled(*spring, target, DETAIL_SPRING_EPSILON) {
+                *spring = SpringState { position: target, velocity: 0. };
+            }
+        }
+        let moving = spring.position != target;
+        self.detail_stepped_at = moving.then_some(now);
+        if moving {
+            window.request_animation_frame();
+        } else if target == 0. {
+            // A dropped detail view drops its log stream too.
+            self.closing_detail = None;
+        }
+        spring.position.clamp(0., 1.)
     }
 
     /// Follows a resize drag. `x` is the pointer position in the window.
@@ -526,12 +554,13 @@ impl AppView {
     }
 
     fn open_detail(&mut self, id: String, pointer: bool, window: &mut Window, cx: &mut Context<Self>) {
-        // A new open stops an exit, and plays the entrance again.
+        // A new open stops an exit. The spring turns back from where it
+        // is. A key opens the pane immediately, because keys are fast and
+        // frequent. A change to a different container keeps the pane
+        // where it is.
         self.closing_detail = None;
-        // A change to a different container keeps the pane where it is.
-        if self.detail.is_none() {
-            self.detail_opens += 1;
-            self.detail_animated = pointer;
+        if !pointer {
+            self.detail_spring = SpringState { position: 1., velocity: 0. };
         }
         // A change to a different container keeps the selected tab.
         let tab = self.detail.as_ref().map(|d| d.read(cx).tab()).unwrap_or_default();
@@ -558,20 +587,10 @@ impl AppView {
         let Some(detail) = self.detail.take() else { return };
         self._detail_sub = None;
         if pointer && !cx.reduce_motion() {
-            self.detail_closes += 1;
-            let n = self.detail_closes;
-            self.closing_detail = Some((detail, n));
-            cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(DETAIL_EXIT_DURATION).await;
-                let _ = this.update(cx, |this, cx| {
-                    // A dropped detail view drops its log stream too.
-                    if this.closing_detail.as_ref().is_some_and(|(_, m)| *m == n) {
-                        this.closing_detail = None;
-                        cx.notify();
-                    }
-                });
-            })
-            .detach();
+            self.closing_detail = Some(detail);
+        } else {
+            self.closing_detail = None;
+            self.detail_spring = SpringState { position: 0., velocity: 0. };
         }
         cx.notify();
     }
@@ -679,12 +698,15 @@ fn with_drag_area(content: impl IntoElement) -> AnyElement {
 impl Render for AppView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let sidebar_area = self.step_sidebar(window, cx);
+        let detail_reveal = self.step_detail(window, cx);
         let window_width = window.viewport_size().width;
         let detail_width = self.detail_pane_width(window_width - sidebar_area);
+        // The pane keeps its full width while it opens or closes. Only the
+        // area that shows it changes, and the list gets the rest.
+        let detail_area = detail_width * detail_reveal;
         let sidebar_width = self.sidebar_panel_width(window_width, cx);
         let main_width = window_width - sidebar_area;
-        let list_width =
-            if self.detail_shown(cx) { main_width - detail_width } else { main_width };
+        let list_width = main_width - detail_area;
         self.list.update(cx, |l, cx| l.set_width(list_width, cx));
         let t = cx.theme().clone();
         let view = cx.weak_entity();
@@ -725,60 +747,54 @@ impl Render for AppView {
                 .min_w_0()
                 .h_full()
                 .child(div().flex_1().min_w_0().h_full().child(self.list.clone()))
-                .when_some(self.detail.clone(), |d, detail| {
+                .when_some(self.detail.clone().or_else(|| self.closing_detail.clone()), |d, detail| {
+                    let open = self.detail.is_some();
+                    // The pane sits at the left edge of its area, and the
+                    // area cuts off the rest. The pane thus comes in from
+                    // the right edge, where it lives, and the edge of the
+                    // list moves with it.
                     let pane = div()
-                        .relative()
-                        .w(detail_width)
-                        .flex_shrink_0()
-                        .h_full()
-                        .child(detail)
-                        .child(
-                            // The handle is on the border at the left of the
-                            // pane, and goes a small distance into the list.
-                            div()
-                                .id("detail-resize")
-                                .absolute()
-                                .top_0()
-                                .left(px(-DETAIL_HANDLE_WIDTH / 2.))
-                                .w(px(DETAIL_HANDLE_WIDTH))
-                                .h_full()
-                                .occlude()
-                                .cursor_col_resize()
-                                .on_drag(
-                                    DetailResize { grab: Rc::default() },
-                                    |drag, offset, _, cx| {
-                                        drag.grab.set(offset.x);
-                                        cx.new(|_| ResizeDrag)
-                                    },
-                                ),
-                        );
-                    if self.detail_animated {
-                        // Come in from the right edge, where the pane lives.
-                        d.child(pane.with_animation(
-                            ("detail-enter", self.detail_opens),
-                            Animation::new(ENTER_DURATION).with_easing(ease_out_quint()),
-                            |pane, t| pane.opacity(t).left(px(16. * (1. - t))),
-                        ))
-                    } else {
-                        d.child(pane)
-                    }
-                })
-                .when_some(self.closing_detail.clone(), |d, (detail, n)| {
-                    // Go out to the right edge. The pane has no resize
-                    // handle, and it takes no clicks.
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
+                        .overflow_hidden()
+                        .child(div().w(detail_width).h_full().child(detail));
                     d.child(
                         div()
                             .relative()
-                            .w(detail_width)
+                            .w(detail_area)
                             .flex_shrink_0()
                             .h_full()
-                            .child(detail)
-                            .child(div().absolute().inset_0().occlude())
-                            .with_animation(
-                                ("detail-exit", n),
-                                Animation::new(DETAIL_EXIT_DURATION).with_easing(ease_out_quint()),
-                                |pane, t| pane.opacity(1. - t).left(px(8. * t)),
-                            ),
+                            .child(pane)
+                            .map(|d| {
+                                if open {
+                                    // The handle is on the border at the left
+                                    // of the pane, and goes a small distance
+                                    // into the list.
+                                    d.child(
+                                        div()
+                                            .id("detail-resize")
+                                            .absolute()
+                                            .top_0()
+                                            .left(px(-DETAIL_HANDLE_WIDTH / 2.))
+                                            .w(px(DETAIL_HANDLE_WIDTH))
+                                            .h_full()
+                                            .occlude()
+                                            .cursor_col_resize()
+                                            .on_drag(
+                                                DetailResize { grab: Rc::default() },
+                                                |drag, offset, _, cx| {
+                                                    drag.grab.set(offset.x);
+                                                    cx.new(|_| ResizeDrag)
+                                                },
+                                            ),
+                                    )
+                                } else {
+                                    // The pane that goes out takes no clicks.
+                                    d.child(div().absolute().inset_0().occlude())
+                                }
+                            }),
                     )
                 })
                 .into_any_element()

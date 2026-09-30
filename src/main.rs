@@ -5,6 +5,7 @@ mod runtime;
 mod state;
 mod terminal;
 mod ui;
+mod updater;
 
 use gpui::*;
 use gpui_component::Root;
@@ -31,6 +32,7 @@ fn main() {
             ui::app_view::bind_keys(cx);
             ui::container_list::bind_keys(cx);
             ui::native::init_menus(cx);
+            updater::init(cx);
             cx.on_window_closed(|cx, _| cx.quit()).detach();
 
             let bounds = Bounds::centered(None, size(px(1240.), px(780.)), cx);

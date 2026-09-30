@@ -1,0 +1,54 @@
+# Builds a release when a tag such as v0.2.0 is pushed, and publishes it to
+# the public releases repository. The app looks for updates there.
+#
+# Secrets:
+#   UPDATE_SIGNING_KEY: the PEM text of the Ed25519 release key.
+#   RELEASES_TOKEN: a token that can write the contents of
+#     sam-ayo/colima-gui-releases.
+#
+# The message of an annotated tag becomes the release notes, which the
+# update alert shows.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Check the version
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "The tag $GITHUB_REF_NAME does not agree with version $version in Cargo.toml." >&2
+            exit 1
+          fi
+
+      - name: Get the release notes
+        run: |
+          git fetch --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
+          git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > "$RUNNER_TEMP/notes.txt"
+
+      - name: Install the Rust targets
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build and sign
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: scripts/release.sh "$RUNNER_TEMP/notes.txt"
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" target/release-files/* \
+            --repo sam-ayo/colima-gui-releases \
+            --title "Colima $GITHUB_REF_NAME" \
+            --notes-file "$RUNNER_TEMP/notes.txt"

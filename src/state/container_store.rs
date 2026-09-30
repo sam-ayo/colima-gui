@@ -128,6 +128,8 @@ pub enum ListItem {
         project: String,
         total: usize,
         running: usize,
+        /// The members that are dead or exited with an error code.
+        failed: usize,
         collapsed: bool,
     },
     Row {
@@ -170,6 +172,7 @@ pub fn build_list<'a>(
             project: project.to_string(),
             total: members.len(),
             running: members.iter().filter(|r| r.state.is_running()).count(),
+            failed: members.iter().filter(|r| r.failed()).count(),
             collapsed: is_collapsed,
         });
         if !is_collapsed {
@@ -745,6 +748,7 @@ mod tests {
                 project: "shop".into(),
                 total: 2,
                 running: 1,
+                failed: 0,
                 collapsed: false
             }
         );

@@ -5,8 +5,11 @@
 # installer puts the app in /Applications. It then links the tools into
 # /usr/local/bin, but only for tools that are not already installed.
 #
-# Usage: scripts/package.sh
-# Output: target/package/Colima.app and target/package/colima-gui-<version>.pkg
+# Usage: scripts/package.sh [arm64 | x86_64]
+# The default architecture is the architecture of this Mac. For the other
+# architecture, first run `rustup target add <rust target>`.
+# Output: target/package/<arch>/Colima.app and
+#         target/package/<arch>/colima-gui-<version>-<arch>.pkg
 # Needs: cargo, curl, and the Xcode command line tools (pkgbuild).
 
 set -euo pipefail
@@ -18,17 +21,18 @@ DOCKER_VERSION=29.8.1
 APP_NAME=Colima
 BUNDLE_ID=colima-gui
 
+arch="${1:-$(uname -m)}"
+case "$arch" in
+    arm64) rust_target=aarch64-apple-darwin; colima_arch=arm64; lima_arch=arm64; docker_arch=aarch64 ;;
+    x86_64) rust_target=x86_64-apple-darwin; colima_arch=x86_64; lima_arch=x86_64; docker_arch=x86_64 ;;
+    *) echo "unknown architecture: $arch" >&2; exit 1 ;;
+esac
+
 root="$(cd "$(dirname "$0")/.." && pwd)"
 target="${CARGO_TARGET_DIR:-$root/target}"
-out="$target/package"
+out="$target/package/$arch"
 cache="$target/package-cache"
 version="$(sed -n 's/^version = "\(.*\)"/\1/p' "$root/Cargo.toml" | head -1)"
-
-case "$(uname -m)" in
-    arm64) colima_arch=arm64; lima_arch=arm64; docker_arch=aarch64 ;;
-    x86_64) colima_arch=x86_64; lima_arch=x86_64; docker_arch=x86_64 ;;
-    *) echo "unknown architecture: $(uname -m)" >&2; exit 1 ;;
-esac
 
 # Downloads a file one time into the cache. The second argument is the file
 # name in the cache.
@@ -57,8 +61,8 @@ mkdir -p "$cache"
 rm -rf "$out"
 mkdir -p "$out"
 
-echo "build colima-gui $version"
-cargo build --release --manifest-path "$root/Cargo.toml"
+echo "build colima-gui $version for $arch"
+cargo build --release --target "$rust_target" --manifest-path "$root/Cargo.toml"
 
 colima_file="colima-Darwin-$colima_arch"
 colima_url="https://github.com/abiosoft/colima/releases/download/v$COLIMA_VERSION"
@@ -80,7 +84,7 @@ app="$out/$APP_NAME.app"
 tools="$app/Contents/Resources/tools"
 mkdir -p "$app/Contents/MacOS" "$tools/bin"
 
-cp "$target/release/colima-gui" "$app/Contents/MacOS/colima-gui"
+cp "$target/$rust_target/release/colima-gui" "$app/Contents/MacOS/colima-gui"
 
 # Lima finds its guest agents in ../share/lima, next to bin/limactl. Keep the
 # layout of the archive. Do not sign the tools again: limactl has the
@@ -118,8 +122,8 @@ cat > "$app/Contents/Info.plist" <<EOF
 EOF
 
 # The installer package. The postinstall script links the tools.
-pkgroot="$cache/pkgroot"
-scripts="$cache/pkgscripts"
+pkgroot="$cache/pkgroot-$arch"
+scripts="$cache/pkgscripts-$arch"
 rm -rf "$pkgroot" "$scripts"
 mkdir -p "$pkgroot/Applications" "$scripts"
 cp -R "$app" "$pkgroot/Applications/"
@@ -144,11 +148,11 @@ chmod 755 "$scripts/postinstall"
 
 # The app bundle must stay at /Applications/Colima.app, because the links
 # point there. Do not let the installer move it to a copy in another place.
-component_plist="$cache/component.plist"
+component_plist="$cache/component-$arch.plist"
 pkgbuild --analyze --root "$pkgroot" "$component_plist" >/dev/null
 plutil -replace 0.BundleIsRelocatable -bool NO "$component_plist"
 
-pkg="$out/colima-gui-$version.pkg"
+pkg="$out/colima-gui-$version-$arch.pkg"
 pkgbuild \
     --root "$pkgroot" \
     --component-plist "$component_plist" \

@@ -14,6 +14,7 @@ actions!(
     native,
     [
         About,
+        CheckForUpdates,
         Hide,
         HideOthers,
         ShowAll,
@@ -247,6 +248,7 @@ pub fn init_menus(cx: &mut App) {
         KeyBinding::new("cmd-m", Minimize, None),
     ]);
     cx.on_action(|_: &About, _| platform::show_about_panel(APP_NAME, env!("CARGO_PKG_VERSION")));
+    cx.on_action(|_: &CheckForUpdates, cx| crate::updater::check(true, cx));
     cx.on_action(|_: &Hide, cx| cx.hide());
     cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
     cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
@@ -290,6 +292,7 @@ fn set_menus(cx: &mut App) {
     cx.set_menus([
         Menu::new(APP_NAME).items([
             MenuItem::action(format!("About {APP_NAME}"), About),
+            MenuItem::action("Check for Updates…", CheckForUpdates),
             MenuItem::separator(),
             MenuItem::os_submenu("Services", SystemMenuType::Services),
             MenuItem::separator(),
@@ -331,6 +334,33 @@ fn set_menus(cx: &mut App) {
         ]),
         Menu::new("Help").items([MenuItem::action("Colima Help", ColimaHelp)]),
     ]);
+}
+
+/// Reads a text setting that the app saved between launches.
+pub fn saved_string(key: &str) -> Option<String> {
+    platform::saved_string(key)
+}
+
+pub fn save_string(key: &str, value: &str) {
+    platform::save_string(key, value)
+}
+
+/// True when the app is the active app, so that the user uses it now.
+pub fn is_active() -> bool {
+    platform::is_active()
+}
+
+/// Shows a modal alert with the buttons, the first button as the default.
+/// Returns the index of the button that the user chose.
+///
+/// The alert does not activate the app. If the app is not active, the
+/// alert does not get the key presses of another app, which could choose a
+/// button. Show an alert only when the app is active.
+///
+/// The alert runs its own event loop until it closes. Call it from a task,
+/// not while GPUI updates the app.
+pub fn show_alert(message: &str, info: &str, buttons: &[&str]) -> Option<usize> {
+    platform::show_alert(message, info, buttons)
 }
 
 fn with_active_window(cx: &mut App, f: impl FnOnce(&mut Window, &mut App)) {
@@ -400,7 +430,8 @@ mod platform {
     use objc2::runtime::AnyObject;
     use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
     use objc2_app_kit::{
-        NSAboutPanelOptionApplicationName, NSAboutPanelOptionApplicationVersion, NSAppearance,
+        NSAboutPanelOptionApplicationName, NSAboutPanelOptionApplicationVersion, NSAlert,
+        NSAlertFirstButtonReturn, NSAppearance,
         NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication, NSColor, NSColorSpace,
         NSEvent, NSMenu, NSMenuItem, NSView,
     };
@@ -423,16 +454,39 @@ mod platform {
     const ACCENT_KEY: &str = "AccentColor";
 
     pub(super) fn saved_accent() -> Option<String> {
-        let key = NSString::from_str(ACCENT_KEY);
-        Some(NSUserDefaults::standardUserDefaults().stringForKey(&key)?.to_string())
+        saved_string(ACCENT_KEY)
     }
 
     pub(super) fn save_accent(name: &str) {
-        let key = NSString::from_str(ACCENT_KEY);
-        let value = NSString::from_str(name);
+        save_string(ACCENT_KEY, name)
+    }
+
+    pub(super) fn saved_string(key: &str) -> Option<String> {
+        let key = NSString::from_str(key);
+        Some(NSUserDefaults::standardUserDefaults().stringForKey(&key)?.to_string())
+    }
+
+    pub(super) fn save_string(key: &str, value: &str) {
+        let key = NSString::from_str(key);
+        let value = NSString::from_str(value);
         // SAFETY: a string is a property list value, so the defaults can
         // keep it.
         unsafe { NSUserDefaults::standardUserDefaults().setObject_forKey(Some(&value), &key) };
+    }
+
+    pub(super) fn is_active() -> bool {
+        MainThreadMarker::new().is_some_and(|mtm| NSApplication::sharedApplication(mtm).isActive())
+    }
+
+    pub(super) fn show_alert(message: &str, info: &str, buttons: &[&str]) -> Option<usize> {
+        let mtm = MainThreadMarker::new()?;
+        let alert = NSAlert::new(mtm);
+        alert.setMessageText(&NSString::from_str(message));
+        alert.setInformativeText(&NSString::from_str(info));
+        for title in buttons {
+            alert.addButtonWithTitle(&NSString::from_str(title));
+        }
+        usize::try_from(alert.runModal() - NSAlertFirstButtonReturn).ok()
     }
 
     /// The system color of an accent color choice. `System` has no color
@@ -599,6 +653,16 @@ mod platform {
         None
     }
     pub(super) fn save_accent(_: &str) {}
+    pub(super) fn saved_string(_: &str) -> Option<String> {
+        None
+    }
+    pub(super) fn save_string(_: &str, _: &str) {}
+    pub(super) fn is_active() -> bool {
+        true
+    }
+    pub(super) fn show_alert(_: &str, _: &str, _: &[&str]) -> Option<usize> {
+        None
+    }
     pub(super) fn autosave_frame(_: &Window, _: &'static str, _: &App) {}
     pub(super) fn show_about_panel(_: &str, _: &str) {}
     pub(super) fn pop_up_menu(_: &[MenuEntry]) -> Option<usize> {

@@ -51,6 +51,8 @@ const TREE_X: f32 = ROW_INSET + GUTTER + ICON_SIZE / 2.;
 const CHILD_INSET: f32 = TREE_X + 6.;
 const PORTS_WIDTH: f32 = 150.;
 const ACTIONS_WIDTH: f32 = 80.;
+/// The maximum number of group members that get a stats stream.
+const GROUP_STATS_LIMIT: usize = 30;
 /// The space between the list edge and the rounded row background.
 const ROW_INSET: f32 = 8.;
 /// The list width that a service row with all its columns needs: the
@@ -147,6 +149,8 @@ impl ContainerList {
                     this.rebuild(cx);
                 }
             }),
+            // The group rows show the CPU and memory of their members.
+            cx.observe(&stats, |_, _, cx| cx.notify()),
         ];
         let mut this = ContainerList {
             store,
@@ -221,15 +225,33 @@ impl ContainerList {
         cx.notify();
     }
 
-    /// Opens a stats stream for the selection, if it runs. The detail pane
-    /// shows the values.
+    /// Opens a stats stream for the selection, if it runs, and for the
+    /// running members of the groups in the list. The detail pane shows the
+    /// values of the selection. The group rows show the totals.
     fn sync_stats(&mut self, cx: &mut Context<Self>) {
         let store = self.store.read(cx);
         let selected = self
             .selected
             .as_deref()
             .filter(|id| store.set.rows.get(*id).is_some_and(|r| r.state.is_running()));
-        let wanted = select_wanted(&[], selected, 0);
+        let projects: HashSet<&str> = self
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                ListItem::Group { project, .. } => Some(project.as_str()),
+                ListItem::Row { .. } => None,
+            })
+            .collect();
+        let mut members: Vec<String> = store
+            .set
+            .rows
+            .values()
+            .filter(|r| r.state.is_running())
+            .filter(|r| r.compose_project.as_deref().is_some_and(|p| projects.contains(p)))
+            .map(|r| r.id.clone())
+            .collect();
+        members.sort();
+        let wanted = select_wanted(&members, selected, GROUP_STATS_LIMIT);
         let docker = store.docker().cloned();
         self.stats
             .update(cx, |stats, cx| stats.set_wanted(docker.as_ref(), wanted, cx));
@@ -390,8 +412,9 @@ impl ContainerList {
                 project,
                 total,
                 running,
+                failed,
                 collapsed,
-            } => self.render_group(ix, project, *total, *running, *collapsed, window, cx),
+            } => self.render_group(ix, project, *total, *running, *failed, *collapsed, window, cx),
             ListItem::Row { id, grouped } => self.render_row(ix, id, *grouped, window, cx),
         };
         // A line separates the Compose projects from the single containers.
@@ -496,6 +519,7 @@ impl ContainerList {
         project: &str,
         total: usize,
         running: usize,
+        failed: usize,
         collapsed: bool,
         _: &mut Window,
         cx: &mut Context<Self>,
@@ -517,24 +541,56 @@ impl ContainerList {
         };
         let toggle = p.clone();
         let menu_project = p.clone();
-        let stopped = total - running;
-        let compose_file = self
+        let members: Vec<_> = self
             .store
             .read(cx)
             .set
             .rows
             .values()
-            .find(|r| r.compose_project.as_deref() == Some(project))
-            .and_then(|r| r.compose_file.clone());
-        let summary = format!(
-            "{total} {} · {}",
-            if total == 1 { "container" } else { "containers" },
-            match (running, stopped) {
-                (_, 0) => "all running".to_string(),
-                (0, _) => "all stopped".to_string(),
-                _ => format!("{stopped} stopped"),
+            .filter(|r| r.compose_project.as_deref() == Some(project))
+            .collect();
+        let compose_file = members.iter().find_map(|r| r.compose_file.clone());
+        // The summary keeps the failed containers apart from the clean
+        // stops, so a crash shows when the group is collapsed.
+        let stopped = total - running - failed;
+        let mut summary: Vec<(String, Option<Hsla>)> = vec![(
+            format!("{total} {}", if total == 1 { "container" } else { "containers" }),
+            None,
+        )];
+        // When all members run, the count is sufficient.
+        if running < total {
+            if failed > 0 {
+                summary.push((format!("{failed} failed"), Some(t.red)));
             }
-        );
+            if running > 0 {
+                summary.push((format!("{running} running"), None));
+            }
+            if stopped > 0 {
+                let all = running == 0 && failed == 0;
+                summary.push((if all { "all stopped".into() } else { format!("{stopped} stopped") }, None));
+            }
+        }
+        // The right column shows the total CPU and memory of the members
+        // that run. When no member runs, it shows the last exit.
+        let meta: Option<String> = if running > 0 {
+            let stats = self.stats.read(cx);
+            let samples: Vec<_> = members
+                .iter()
+                .filter(|r| r.state.is_running())
+                .filter_map(|r| stats.latest(&r.id))
+                .collect();
+            (!samples.is_empty()).then(|| {
+                let cpu: f64 = samples.iter().map(|s| s.cpu_percent).sum();
+                let mem: u64 = samples.iter().map(|s| s.mem_bytes).sum();
+                format!("{cpu:.1}% CPU · {}", crate::docker::stats::format_bytes(mem))
+            })
+        } else {
+            members
+                .iter()
+                .filter_map(|r| Some((r.exited_ago()?, r.status_parts().1?)))
+                .min_by_key(|(ago, _)| *ago)
+                .map(|(_, time)| format!("Exited {time}"))
+        };
         h_flex()
             .id(("group", ix))
             .group(HEADER_GROUP)
@@ -596,9 +652,30 @@ impl ContainerList {
                             .when_some(compose_file, |d, path| {
                                 d.child(compose_file_link(ix, path, cx)).child("·")
                             })
-                            .child(div().truncate().child(summary)),
+                            .children(summary.into_iter().enumerate().flat_map(|(i, (part, color))| {
+                                let sep = (i > 0).then(|| div().child("·"));
+                                let part = div()
+                                    .flex_shrink_0()
+                                    .when_some(color, |d, c| d.text_color(c))
+                                    .child(part);
+                                sep.into_iter().chain([part])
+                            })),
                     ),
             )
+            // The column has the width of the ports column of the service
+            // rows, so the values align with the ports below them.
+            .when(!self.compact, |d| {
+                d.child(
+                    div()
+                        .w(px(PORTS_WIDTH))
+                        .flex_shrink_0()
+                        .truncate()
+                        .text_size(px(text::CALLOUT))
+                        .font_features(tabular_nums())
+                        .text_color(t.muted_foreground)
+                        .when_some(meta, |d, meta| d.child(meta)),
+                )
+            })
             .child(
                 h_flex()
                     .w(px(ACTIONS_WIDTH))
