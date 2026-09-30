@@ -1,150 +1,79 @@
 //! A logo for each container, found from its image name.
 
-use std::borrow::Cow;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::ActiveTheme;
 
-use super::brand_data::BRANDS;
+use crate::docker::hub_logo;
+use crate::runtime::Backend;
 
-/// Serves the embedded brand logos at `brand/<slug>.svg`, and all other
-/// paths from the icon set of gpui-kit.
-pub struct Assets;
+enum Logo {
+    Loading,
+    Ready(Arc<Image>),
+    Missing,
+}
 
-impl AssetSource for Assets {
-    fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
-        if let Some(slug) = path.strip_prefix("brand/").and_then(|p| p.strip_suffix(".svg")) {
-            return Ok(BRANDS
-                .iter()
-                .find(|(s, _, _)| *s == slug)
-                .map(|(_, _, data)| Cow::Borrowed(*data)));
+/// The Docker Hub logos, by repository. A logo downloads one time, on the
+/// first render of an image that uses it.
+pub struct LogoStore {
+    logos: HashMap<String, Logo>,
+    client: reqwest::Client,
+}
+
+impl Global for LogoStore {}
+
+impl LogoStore {
+    pub fn init(cx: &mut App) {
+        cx.set_global(LogoStore {
+            logos: HashMap::new(),
+            client: hub_logo::client(),
+        });
+    }
+
+    /// Returns the logo for `image`, or `None` while it downloads or if
+    /// there is no logo.
+    fn logo(image: &str, cx: &mut App) -> Option<Arc<Image>> {
+        let repo = hub_logo::hub_repo(image)?;
+        let store = cx.global_mut::<LogoStore>();
+        match store.logos.get(&repo) {
+            Some(Logo::Ready(logo)) => return Some(logo.clone()),
+            Some(_) => return None,
+            None => {}
         }
-        gpui_kit_assets::AllAssets.load(path)
-    }
-
-    fn list(&self, path: &str) -> Result<Vec<SharedString>> {
-        gpui_kit_assets::AllAssets.list(path)
+        store.logos.insert(repo.clone(), Logo::Loading);
+        let client = store.client.clone();
+        let rx = Backend::global(cx).spawn({
+            let repo = repo.clone();
+            async move { hub_logo::logo(&client, &repo).await }
+        });
+        cx.spawn(async move |cx| {
+            let bytes = rx.await.ok().flatten();
+            let logo = bytes
+                .and_then(|b| Some(Image::from_bytes(sniff_format(&b)?, b)))
+                .map_or(Logo::Missing, |img| Logo::Ready(Arc::new(img)));
+            cx.update(|cx| {
+                cx.global_mut::<LogoStore>().logos.insert(repo, logo);
+                cx.refresh_windows();
+            })
+        })
+        .detach();
+        None
     }
 }
 
-/// Image name parts (repository, namespace) to a brand slug.
-const ALIASES: &[(&str, &str)] = &[
-    ("nginx", "nginx"),
-    ("redis", "redis"),
-    ("redis-stack", "redis"),
-    ("mongo", "mongodb"),
-    ("mongodb", "mongodb"),
-    ("postgres", "postgresql"),
-    ("postgresql", "postgresql"),
-    ("postgis", "postgresql"),
-    ("mysql", "mysql"),
-    ("mariadb", "mariadb"),
-    ("alpine", "alpinelinux"),
-    ("ubuntu", "ubuntu"),
-    ("debian", "debian"),
-    ("fedora", "fedora"),
-    ("node", "nodedotjs"),
-    ("python", "python"),
-    ("golang", "go"),
-    ("rabbitmq", "rabbitmq"),
-    ("elasticsearch", "elasticsearch"),
-    ("kibana", "kibana"),
-    ("logstash", "logstash"),
-    ("opensearch", "opensearch"),
-    ("grafana", "grafana"),
-    ("prometheus", "prometheus"),
-    ("traefik", "traefikproxy"),
-    ("caddy", "caddy"),
-    ("httpd", "apache"),
-    ("tomcat", "apachetomcat"),
-    ("docker", "docker"),
-    ("dind", "docker"),
-    ("azurite", "microsoftazure"),
-    ("azure-storage", "microsoftazure"),
-    ("dotnet", "dotnet"),
-    ("minio", "minio"),
-    ("php", "php"),
-    ("ruby", "ruby"),
-    ("rust", "rust"),
-    ("openjdk", "openjdk"),
-    ("eclipse-temurin", "openjdk"),
-    ("amazoncorretto", "openjdk"),
-    ("kafka", "apachekafka"),
-    ("keycloak", "keycloak"),
-    ("jenkins", "jenkins"),
-    ("wordpress", "wordpress"),
-    ("nextcloud", "nextcloud"),
-    ("bun", "bun"),
-    ("deno", "deno"),
-    ("localstack", "amazonwebservices"),
-    ("influxdb", "influxdb"),
-    ("clickhouse", "clickhouse"),
-    ("clickhouse-server", "clickhouse"),
-    ("gitea", "gitea"),
-    ("gitlab", "gitlab"),
-    ("gitlab-ce", "gitlab"),
-    ("gitlab-ee", "gitlab"),
-    ("vault", "vault"),
-    ("consul", "consul"),
-    ("etcd", "etcd"),
-    ("portainer", "portainer"),
-    ("portainer-ce", "portainer"),
-    ("home-assistant", "homeassistant"),
-    ("pihole", "pihole"),
-    ("n8n", "n8n"),
-    ("ollama", "ollama"),
-    ("supabase", "supabase"),
-    ("neo4j", "neo4j"),
-    ("cassandra", "apachecassandra"),
-    ("couchbase", "couchbase"),
-    ("couchdb", "apachecouchdb"),
-    ("selenium", "selenium"),
-    ("playwright", "playwright"),
-];
-
-fn alias(name: &str) -> Option<&'static str> {
-    ALIASES.iter().find(|(k, _)| *k == name).map(|(_, v)| *v)
-}
-
-/// Finds the brand slug for an image reference such as
-/// `mcr.microsoft.com/azure-storage/azurite:3.37.0` or `redis:7-alpine`.
-/// Tries the repository name, then the namespaces, then the parts of the
-/// repository name (so `cp-kafka` finds Kafka). Returns `None` for an
-/// image that it does not know, for example a local build.
-pub fn brand_for_image(image: &str) -> Option<&'static str> {
-    let image = image.split('@').next().unwrap_or(image).to_lowercase();
-    let mut parts: Vec<&str> = image.split('/').collect();
-    // Remove the tag from the last part.
-    if let Some(last) = parts.last_mut() {
-        *last = last.split(':').next().unwrap_or(last);
+/// Finds the format from the first bytes. Docker Hub and Gravatar send
+/// PNG or JPEG, but the content type is not always correct.
+fn sniff_format(bytes: &[u8]) -> Option<ImageFormat> {
+    match bytes {
+        [0x89, b'P', b'N', b'G', ..] => Some(ImageFormat::Png),
+        [0xFF, 0xD8, ..] => Some(ImageFormat::Jpeg),
+        [b'G', b'I', b'F', b'8', ..] => Some(ImageFormat::Gif),
+        [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P', ..] => Some(ImageFormat::Webp),
+        _ => None,
     }
-    // Remove the registry host.
-    if parts.len() > 1 && (parts[0].contains(['.', ':']) || parts[0] == "localhost") {
-        parts.remove(0);
-    }
-    let (repo, namespaces) = parts.split_last()?;
-    alias(repo)
-        .or_else(|| namespaces.iter().rev().find_map(|n| alias(n)))
-        .or_else(|| repo.split(['-', '_', '.']).find_map(alias))
-}
-
-/// Converts `0xRRGGBB` to a color that has contrast with the background.
-/// A black or gray brand color becomes the theme text color. A dark color
-/// gets lighter on a dark theme, and a light color gets darker on a light
-/// theme. The hue does not change.
-fn brand_color(rgb: u32, cx: &App) -> Hsla {
-    let mut color: Hsla = gpui::rgb(rgb).into();
-    let dark = cx.theme().mode.is_dark();
-    if color.s < 0.15 && (color.l < 0.3 || color.l > 0.8) {
-        return cx.theme().foreground;
-    }
-    if dark && color.l < 0.5 {
-        color.l = 0.6;
-    } else if !dark && color.l > 0.7 {
-        color.l = 0.45;
-    }
-    color
 }
 
 /// A logo with a status badge. A stopped container shows a faded logo.
@@ -174,33 +103,36 @@ impl ContainerIcon {
 
 impl RenderOnce for ContainerIcon {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        let logo = LogoStore::logo(&self.image, cx);
         let t = cx.theme();
-        let brand = brand_for_image(&self.image)
-            .and_then(|slug| BRANDS.iter().find(|(s, _, _)| *s == slug));
-        let (path, color): (SharedString, Hsla) = match brand {
-            Some((slug, rgb, _)) => (format!("brand/{slug}.svg").into(), brand_color(*rgb, cx)),
-            None => ("icons/container.svg".into(), t.muted_foreground),
-        };
         let badge = self.size * 0.36;
         div()
             .relative()
             .flex_shrink_0()
             .size(self.size)
             .rounded(t.radius)
-            // A tint of the logo color, not a dark tile, so the logo stands out.
-            .bg(color.opacity(if self.running { 0.28 } else { 0.12 }))
             .border_1()
-            .border_color(color.opacity(if self.running { 0.55 } else { 0.25 }))
+            .border_color(t.border)
             .flex()
             .items_center()
             .justify_center()
-            .child(
-                svg()
-                    .path(path)
-                    .size(self.size * 0.6)
-                    .text_color(color)
-                    .when(!self.running, |s| s.opacity(0.55)),
-            )
+            .when(!self.running, |d| d.opacity(0.55))
+            .map(|d| match logo {
+                // A white tile for all themes, because the logos are made
+                // for a light background.
+                Some(logo) => d.bg(gpui::white()).child(
+                    img(logo)
+                        .size(self.size * 0.8)
+                        .object_fit(ObjectFit::Contain)
+                        .grayscale(!self.running),
+                ),
+                None => d.bg(t.muted).child(
+                    svg()
+                        .path("icons/container.svg")
+                        .size(self.size * 0.6)
+                        .text_color(t.muted_foreground),
+                ),
+            })
             .child(
                 div()
                     .absolute()
@@ -218,42 +150,14 @@ impl RenderOnce for ContainerIcon {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: that brings `gpui::test`, which replaces `#[test]`.
-    use super::{ALIASES, Assets, BRANDS, brand_for_image};
-    use gpui::AssetSource as _;
+    use super::sniff_format;
+    use gpui::ImageFormat;
 
     #[test]
-    fn finds_brands_from_image_names() {
-        let cases = [
-            ("nginx:alpine", Some("nginx")),
-            ("redis:7-alpine", Some("redis")),
-            ("library/postgres:16", Some("postgresql")),
-            ("docker.io/library/mysql:8", Some("mysql")),
-            ("mongodb/mongodb-atlas-local:8", Some("mongodb")),
-            ("mcr.microsoft.com/azure-storage/azurite:3.37.0", Some("microsoftazure")),
-            ("confluentinc/cp-kafka:7.6.0", Some("apachekafka")),
-            ("bitnami/postgresql@sha256:abc", Some("postgresql")),
-            ("localhost:5000/team/node:20", Some("nodedotjs")),
-            ("enaimco-api-server", None),
-            ("ghcr.io/acme/billing", None),
-            ("", None),
-        ];
-        for (image, want) in cases {
-            assert_eq!(brand_for_image(image), want, "{image}");
-        }
-    }
-
-    #[test]
-    fn every_alias_has_a_logo() {
-        for (_, slug) in ALIASES {
-            assert!(BRANDS.iter().any(|(s, _, _)| s == slug), "no logo for {slug}");
-        }
-    }
-
-    #[test]
-    fn asset_source_serves_brand_and_kit_icons() {
-        let a = Assets;
-        assert!(a.load("brand/nginx.svg").unwrap().is_some());
-        assert!(a.load("brand/unknown.svg").unwrap().is_none());
-        assert!(a.load("icons/container.svg").unwrap().is_some());
+    fn sniffs_image_formats() {
+        assert_eq!(sniff_format(b"\x89PNG\r\n"), Some(ImageFormat::Png));
+        assert_eq!(sniff_format(&[0xFF, 0xD8, 0xFF]), Some(ImageFormat::Jpeg));
+        assert_eq!(sniff_format(b"RIFF\0\0\0\0WEBPVP8"), Some(ImageFormat::Webp));
+        assert_eq!(sniff_format(b"{\"message\":\"not found\"}"), None);
     }
 }

@@ -21,11 +21,12 @@ fn main() {
     let early = state::container_store::EarlyConnect::start(&backend);
 
     gpui_platform::application()
-        .with_assets(ui::image_icon::Assets)
+        .with_assets(gpui_kit_assets::AllAssets)
         .run(|cx: &mut App| {
             cx.set_global(backend);
             cx.set_global(early);
             gpui_component::init(cx);
+            ui::image_icon::LogoStore::init(cx);
             ui::sync_reduce_motion(cx);
             ui::container_list::bind_keys(cx);
             cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);

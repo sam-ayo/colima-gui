@@ -1,5 +1,4 @@
 pub mod app_view;
-mod brand_data;
 pub mod container_detail;
 pub mod container_list;
 pub mod image_icon;
