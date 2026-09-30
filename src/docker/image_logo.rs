@@ -5,10 +5,13 @@
 //!    Compose file sets.
 //! 2. Docker Hub: the repository logo of an official image, or the avatar
 //!    of the publisher.
-//! 3. The GitHub avatar of the owner of a `ghcr.io` image, or the Quay
-//!    avatar of the namespace of a `quay.io` image.
+//! 3. The GitHub avatar of the owner of a `ghcr.io` image, the Quay
+//!    avatar of the namespace of a `quay.io` image, or the product image
+//!    of a `mcr.microsoft.com` image from the Microsoft Artifact Registry.
+//!    An Azure image on `mcr.microsoft.com` gets the Azure logo, because
+//!    its product image is often a generic icon.
 //! 4. The GitHub avatar of the company that runs the registry, for
-//!    registries such as `mcr.microsoft.com`.
+//!    registries such as `docker.elastic.co`.
 
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::PathBuf;
@@ -24,7 +27,6 @@ const DOCKER_HUB_HOSTS: &[&str] = &["docker.io", "index.docker.io", "registry-1.
 
 /// Registries that one company runs, to the GitHub account of the company.
 const REGISTRY_OWNERS: &[(&str, &str)] = &[
-    ("mcr.microsoft.com", "microsoft"),
     ("registry.k8s.io", "kubernetes"),
     ("k8s.gcr.io", "kubernetes"),
     ("public.ecr.aws", "aws"),
@@ -47,6 +49,9 @@ pub enum Source {
     GitHub(String),
     /// A Quay namespace.
     Quay(String),
+    /// A Microsoft Artifact Registry repository, such as
+    /// `azure-storage/azurite`.
+    Mcr(String),
 }
 
 impl Source {
@@ -78,6 +83,10 @@ impl Source {
             }
             (Some("ghcr.io"), [owner, _, ..]) => Some(Source::GitHub(owner.to_string())),
             (Some("quay.io"), [namespace, _, ..]) => Some(Source::Quay(namespace.to_string())),
+            (Some("mcr.microsoft.com"), path) if path.iter().any(|p| p.contains("azure")) => {
+                Some(Source::GitHub("Azure".into()))
+            }
+            (Some("mcr.microsoft.com"), path) => Some(Source::Mcr(path.join("/"))),
             (Some(h), _) => REGISTRY_OWNERS
                 .iter()
                 .find(|(host, _)| *host == h)
@@ -96,6 +105,7 @@ impl Source {
             Source::Hub(repo) => format!("hub__{}", repo.replace('/', "__")),
             Source::GitHub(owner) => format!("github__{owner}"),
             Source::Quay(namespace) => format!("quay__{namespace}"),
+            Source::Mcr(repo) => format!("mcr__{}", repo.replace('/', "__")),
         }
     }
 }
@@ -186,6 +196,16 @@ async fn fetch(client: &Client, source: &Source) -> Result<Option<Vec<u8>>> {
         Source::Url(url) => get(client, url).await,
         Source::Hub(repo) => fetch_hub(client, repo).await,
         Source::GitHub(owner) => get(client, &format!("https://github.com/{owner}.png?size=128")).await,
+        Source::Mcr(repo) => {
+            let url = format!("https://mcr.microsoft.com/api/v1/catalog/{repo}/details?reg=mar");
+            let details = get_json(client, &url).await?;
+            match details.as_ref().and_then(|d| d["imagePath"].as_str()) {
+                Some(path) if path.starts_with('/') => {
+                    get(client, &format!("https://mcr.microsoft.com{path}")).await
+                }
+                _ => get(client, "https://github.com/microsoft.png?size=128").await,
+            }
+        }
         Source::Quay(namespace) => {
             let url = format!("https://quay.io/api/v1/organization/{namespace}");
             let hash = get_json(client, &url).await?;
@@ -260,7 +280,9 @@ mod tests {
             ("enaimco-api-server", hub("library/enaimco-api-server")),
             ("public.ecr.aws/docker/library/node:20", hub("library/node")),
             ("ghcr.io/home-assistant/home-assistant:stable", github("home-assistant")),
-            ("mcr.microsoft.com/azure-storage/azurite:3.37.0", github("microsoft")),
+            ("mcr.microsoft.com/azure-storage/azurite:3.37.0", github("Azure")),
+            ("mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator", github("Azure")),
+            ("mcr.microsoft.com/dotnet/sdk:8.0", Some(Source::Mcr("dotnet/sdk".into()))),
             ("docker.elastic.co/elasticsearch/elasticsearch:8", github("elastic")),
             ("quay.io/prometheus/node-exporter", Some(Source::Quay("prometheus".into()))),
             ("localhost:5000/team/node:20", None),
@@ -297,6 +319,8 @@ mod tests {
             Source::Hub("confluentinc/cp-kafka".into()),
             Source::GitHub("home-assistant".into()),
             Source::Quay("prometheus".into()),
+            Source::Mcr("azure-storage/azurite".into()),
+            Source::Mcr("no-such-repo/cgui".into()),
         ];
         for source in found {
             let bytes = fetch(&c, &source).await.unwrap();
