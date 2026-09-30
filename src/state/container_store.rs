@@ -525,6 +525,7 @@ mod tests {
             ports: String::new(),
             compose_project: project.map(Into::into),
             compose_service: None,
+            icon: None,
             created: 0,
         }
     }

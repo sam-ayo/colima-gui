@@ -12,6 +12,8 @@ use bollard::query_parameters::{
 
 pub const COMPOSE_PROJECT_LABEL: &str = "com.docker.compose.project";
 pub const COMPOSE_SERVICE_LABEL: &str = "com.docker.compose.service";
+/// An icon URL for the container. OrbStack reads the same label.
+pub const ICON_LABEL: &str = "dev.orbstack.icon";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State {
@@ -58,6 +60,7 @@ pub struct ContainerRow {
     pub ports: String,
     pub compose_project: Option<String>,
     pub compose_service: Option<String>,
+    pub icon: Option<String>,
     pub created: i64,
 }
 
@@ -84,6 +87,7 @@ impl From<ContainerSummary> for ContainerRow {
             ports: format_ports(c.ports.as_deref().unwrap_or_default()),
             compose_project: labels.get(COMPOSE_PROJECT_LABEL).cloned(),
             compose_service: labels.get(COMPOSE_SERVICE_LABEL).cloned(),
+            icon: labels.get(ICON_LABEL).cloned(),
             created: c.created.unwrap_or_default(),
         }
     }

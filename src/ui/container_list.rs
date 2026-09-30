@@ -441,7 +441,7 @@ impl ContainerList {
                     .min_w(px(NAME_MIN_WIDTH))
                     .gap_2()
                     .when(grouped, |d| d.pl_4())
-                    .child(super::image_icon::ContainerIcon::new(&row.image, dot, running))
+                    .child(super::image_icon::ContainerIcon::new(&row.image, row.icon.as_deref(), dot, running))
                     .child(
                         v_flex()
                             .flex_1()

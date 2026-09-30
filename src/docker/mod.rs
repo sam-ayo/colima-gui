@@ -2,7 +2,7 @@
 
 pub mod containers;
 pub mod events;
-pub mod hub_logo;
+pub mod image_logo;
 pub mod logs;
 pub mod stats;
 

@@ -251,6 +251,7 @@ impl Render for ContainerDetail {
                         d.child(
                             super::image_icon::ContainerIcon::new(
                                 &r.image,
+                                r.icon.as_deref(),
                                 super::state_color(s, cx),
                                 s.is_running(),
                             )

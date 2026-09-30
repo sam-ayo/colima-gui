@@ -1,4 +1,4 @@
-//! A logo for each container, found from its image name.
+//! A logo for each container, found from its image name and labels.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -7,7 +7,7 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::ActiveTheme;
 
-use crate::docker::hub_logo;
+use crate::docker::image_logo::{self, Source};
 use crate::runtime::Backend;
 
 enum Logo {
@@ -16,10 +16,10 @@ enum Logo {
     Missing,
 }
 
-/// The Docker Hub logos, by repository. A logo downloads one time, on the
-/// first render of an image that uses it.
+/// The logos, by source. A logo downloads one time, on the first render
+/// of a container that uses it.
 pub struct LogoStore {
-    logos: HashMap<String, Logo>,
+    logos: HashMap<Source, Logo>,
     client: reqwest::Client,
 }
 
@@ -29,25 +29,25 @@ impl LogoStore {
     pub fn init(cx: &mut App) {
         cx.set_global(LogoStore {
             logos: HashMap::new(),
-            client: hub_logo::client(),
+            client: image_logo::client(),
         });
     }
 
-    /// Returns the logo for `image`, or `None` while it downloads or if
-    /// there is no logo.
-    fn logo(image: &str, cx: &mut App) -> Option<Arc<Image>> {
-        let repo = hub_logo::hub_repo(image)?;
+    /// Returns the logo for a container, or `None` while it downloads or
+    /// if there is no logo.
+    fn logo(image: &str, icon: Option<&str>, cx: &mut App) -> Option<Arc<Image>> {
+        let source = Source::find(image, icon)?;
         let store = cx.global_mut::<LogoStore>();
-        match store.logos.get(&repo) {
+        match store.logos.get(&source) {
             Some(Logo::Ready(logo)) => return Some(logo.clone()),
             Some(_) => return None,
             None => {}
         }
-        store.logos.insert(repo.clone(), Logo::Loading);
+        store.logos.insert(source.clone(), Logo::Loading);
         let client = store.client.clone();
         let rx = Backend::global(cx).spawn({
-            let repo = repo.clone();
-            async move { hub_logo::logo(&client, &repo).await }
+            let source = source.clone();
+            async move { image_logo::logo(&client, &source).await }
         });
         cx.spawn(async move |cx| {
             let bytes = rx.await.ok().flatten();
@@ -55,7 +55,7 @@ impl LogoStore {
                 .and_then(|b| Some(Image::from_bytes(sniff_format(&b)?, b)))
                 .map_or(Logo::Missing, |img| Logo::Ready(Arc::new(img)));
             cx.update(|cx| {
-                cx.global_mut::<LogoStore>().logos.insert(repo, logo);
+                cx.global_mut::<LogoStore>().logos.insert(source, logo);
                 cx.refresh_windows();
             })
         })
@@ -64,9 +64,14 @@ impl LogoStore {
     }
 }
 
-/// Finds the format from the first bytes. Docker Hub and Gravatar send
-/// PNG or JPEG, but the content type is not always correct.
+/// Finds the format from the first bytes, because a server does not always
+/// send the correct content type.
 fn sniff_format(bytes: &[u8]) -> Option<ImageFormat> {
+    let text = String::from_utf8_lossy(&bytes[..bytes.len().min(512)]);
+    let text = text.trim_start();
+    if text.starts_with("<svg") || (text.starts_with("<?xml") && text.contains("<svg")) {
+        return Some(ImageFormat::Svg);
+    }
     match bytes {
         [0x89, b'P', b'N', b'G', ..] => Some(ImageFormat::Png),
         [0xFF, 0xD8, ..] => Some(ImageFormat::Jpeg),
@@ -80,15 +85,18 @@ fn sniff_format(bytes: &[u8]) -> Option<ImageFormat> {
 #[derive(IntoElement)]
 pub struct ContainerIcon {
     image: String,
+    icon: Option<String>,
     status: Hsla,
     running: bool,
     size: Pixels,
 }
 
 impl ContainerIcon {
-    pub fn new(image: &str, status: Hsla, running: bool) -> Self {
+    /// `icon` is the value of the `dev.orbstack.icon` label.
+    pub fn new(image: &str, icon: Option<&str>, status: Hsla, running: bool) -> Self {
         ContainerIcon {
             image: image.to_string(),
+            icon: icon.map(str::to_string),
             status,
             running,
             size: px(28.),
@@ -103,7 +111,7 @@ impl ContainerIcon {
 
 impl RenderOnce for ContainerIcon {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
-        let logo = LogoStore::logo(&self.image, cx);
+        let logo = LogoStore::logo(&self.image, self.icon.as_deref(), cx);
         let t = cx.theme();
         let badge = self.size * 0.36;
         div()
@@ -158,6 +166,9 @@ mod tests {
         assert_eq!(sniff_format(b"\x89PNG\r\n"), Some(ImageFormat::Png));
         assert_eq!(sniff_format(&[0xFF, 0xD8, 0xFF]), Some(ImageFormat::Jpeg));
         assert_eq!(sniff_format(b"RIFF\0\0\0\0WEBPVP8"), Some(ImageFormat::Webp));
+        assert_eq!(sniff_format(b"<?xml version=\"1.0\"?>\n<svg xmlns=\"\">"), Some(ImageFormat::Svg));
+        assert_eq!(sniff_format(b"<svg viewBox=\"0 0 1 1\">"), Some(ImageFormat::Svg));
+        assert_eq!(sniff_format(b"<!DOCTYPE html><html>"), None);
         assert_eq!(sniff_format(b"{\"message\":\"not found\"}"), None);
     }
 }
