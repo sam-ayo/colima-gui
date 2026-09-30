@@ -522,9 +522,10 @@ mod tests {
             image: "nginx".into(),
             state,
             status: String::new(),
-            ports: String::new(),
+            ports: Vec::new(),
             compose_project: project.map(Into::into),
             compose_service: None,
+            compose_file: None,
             icon: None,
             created: 0,
         }

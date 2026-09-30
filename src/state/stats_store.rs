@@ -10,9 +10,6 @@ use crate::docker::stats::{self, Sample};
 use crate::runtime::Backend;
 
 pub const HISTORY_LEN: usize = 60;
-/// The maximum number of streams for the visible rows. The selected
-/// container always gets a stream, in addition to this limit.
-pub const MAX_VISIBLE_STREAMS: usize = 30;
 
 #[derive(Default)]
 pub struct History {
@@ -150,9 +147,10 @@ mod tests {
 
     #[test]
     fn wanted_respects_limit_and_selection() {
+        const LIMIT: usize = 30;
         let visible: Vec<String> = (0..50).map(|i| i.to_string()).collect();
-        let w = select_wanted(&visible, Some("99"), MAX_VISIBLE_STREAMS);
-        assert_eq!(w.len(), MAX_VISIBLE_STREAMS + 1);
+        let w = select_wanted(&visible, Some("99"), LIMIT);
+        assert_eq!(w.len(), LIMIT + 1);
         assert!(w.contains("99"));
         assert!(w.contains("0"));
         assert!(!w.contains("45"));

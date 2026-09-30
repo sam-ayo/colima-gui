@@ -32,16 +32,76 @@ pub fn docker_socket() -> Option<String> {
     status.docker_socket.filter(|s| !s.is_empty())
 }
 
-/// Runs `colima start` and waits until it finishes.
+/// One Colima profile, from `colima list --json`.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct Machine {
+    pub name: String,
+    pub status: String,
+}
+
+impl Machine {
+    pub fn is_running(&self) -> bool {
+        self.status == "Running"
+    }
+}
+
+/// Reads the profiles. `colima list --json` writes one JSON object on each
+/// line. An empty list means that the command failed.
+pub fn list() -> Vec<Machine> {
+    let Ok(out) = colima().args(["list", "--json"]).output() else {
+        return Vec::new();
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    parse_list(&String::from_utf8_lossy(&out.stdout))
+}
+
+fn parse_list(text: &str) -> Vec<Machine> {
+    text.lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect()
+}
+
+/// Runs `colima start` for the default profile and waits until it finishes.
 pub fn start() -> Result<()> {
+    run(&["start"])
+}
+
+/// Starts or stops one profile and waits until the command finishes.
+pub fn set_running(profile: &str, running: bool) -> Result<()> {
+    run(&[if running { "start" } else { "stop" }, "--profile", profile])
+}
+
+fn run(args: &[&str]) -> Result<()> {
     let out = colima()
-        .arg("start")
+        .args(args)
         .output()
         .context("could not run `colima`. Make sure that it is on the PATH")?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         let last = err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("");
-        bail!("colima start failed: {last}");
+        bail!("colima {} failed: {last}", args[0]);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn list_has_one_machine_on_each_line() {
+        let text = concat!(
+            r#"{"name":"default","status":"Running","arch":"aarch64","cpus":4}"#,
+            "\n",
+            r#"{"name":"k8s-lab","status":"Stopped","arch":"aarch64","cpus":2}"#,
+            "\n",
+        );
+        let list = parse_list(text);
+        assert_eq!(list.len(), 2);
+        assert!(list[0].is_running());
+        assert_eq!(list[1].name, "k8s-lab");
+        assert!(!list[1].is_running());
+    }
 }

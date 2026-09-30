@@ -15,7 +15,7 @@ use gpui_kit_assets::IconName;
 use crate::docker::logs::{self, LogLine, LogStream};
 use crate::runtime::{Backend, recv_batch};
 use crate::state::log_buffer::{LogBuffer, MAX_LINES};
-use crate::ui::tabular_nums;
+use crate::ui::{tabular_nums, text};
 
 const LINE_HEIGHT: f32 = 18.;
 /// Very long lines are cut for display, so text layout stays fast.
@@ -159,13 +159,13 @@ impl Render for LogsView {
                     )
                     .child(
                         div()
-                            .text_xs()
+                            .text_size(px(text::SUBHEADLINE))
                             .font_features(tabular_nums())
                             .text_color(t.muted_foreground)
                             .child(status),
                     )
                     .when(self.ended, |d| {
-                        d.child(div().text_xs().text_color(t.muted_foreground).child("· ended"))
+                        d.child(div().text_size(px(text::SUBHEADLINE)).text_color(t.muted_foreground).child("· ended"))
                     })
                     .child(
                         Button::new("follow")
@@ -183,7 +183,7 @@ impl Render for LogsView {
                     .flex_1()
                     .min_h_0()
                     .font_family(t.mono_font_family.clone())
-                    .text_xs()
+                    .text_size(px(text::SUBHEADLINE))
                     .on_scroll_wheel(cx.listener(Self::on_scroll))
                     .child(
                         uniform_list(

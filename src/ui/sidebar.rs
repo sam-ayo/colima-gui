@@ -1,44 +1,57 @@
-//! The left navigation.
+//! The left navigation: the Docker and Kubernetes sections, and the Colima
+//! machines.
+
+use std::collections::HashSet;
+use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
+use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::spinner::Spinner;
 use gpui_component::{ActiveTheme, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit_assets::IconName;
 
-use super::{TOOLBAR_HEIGHT, drag_area, tabular_nums};
-use crate::docker::EngineStatus;
+use super::{SIDEBAR_INSET, SIDEBAR_RADIUS, TOOLBAR_HEIGHT, drag_area, native, text};
+use crate::colima::Machine;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Section {
     Containers,
-    Images,
     Volumes,
+    Images,
     Networks,
+    Pods,
+    Services,
 }
 
 impl Section {
-    pub const ALL: [Section; 4] = [
+    const DOCKER: [Section; 4] = [
         Section::Containers,
-        Section::Images,
         Section::Volumes,
+        Section::Images,
         Section::Networks,
     ];
+    const KUBERNETES: [Section; 2] = [Section::Pods, Section::Services];
 
     pub fn label(self) -> &'static str {
         match self {
             Section::Containers => "Containers",
-            Section::Images => "Images",
             Section::Volumes => "Volumes",
+            Section::Images => "Images",
             Section::Networks => "Networks",
+            Section::Pods => "Pods",
+            Section::Services => "Services",
         }
     }
 
     pub fn icon(self) -> IconName {
         match self {
-            Section::Containers => IconName::Container,
+            Section::Containers => IconName::Box,
+            Section::Volumes => IconName::Database,
             Section::Images => IconName::Layers,
-            Section::Volumes => IconName::HardDrive,
-            Section::Networks => IconName::Network,
+            Section::Networks => IconName::Globe,
+            Section::Pods => IconName::Hexagon,
+            Section::Services => IconName::Server,
         }
     }
 
@@ -48,120 +61,200 @@ impl Section {
     }
 }
 
-type SelectHandler = std::rc::Rc<dyn Fn(Section, &mut Window, &mut App)>;
+type SelectHandler = Rc<dyn Fn(Section, &mut Window, &mut App)>;
+type ToggleHandler = Rc<dyn Fn(&str, &mut Window, &mut App)>;
 
 #[derive(IntoElement)]
 pub struct Sidebar {
     active: Section,
-    running: usize,
-    engine: EngineStatus,
+    width: Pixels,
+    machines: Vec<Machine>,
+    busy: HashSet<String>,
+    /// The profile that the app connects to.
+    current: String,
     on_select: SelectHandler,
+    on_toggle: ToggleHandler,
 }
 
 impl Sidebar {
     pub fn new(
         active: Section,
-        running: usize,
-        engine: EngineStatus,
+        width: Pixels,
         on_select: impl Fn(Section, &mut Window, &mut App) + 'static,
     ) -> Self {
         Sidebar {
             active,
-            running,
-            engine,
-            on_select: std::rc::Rc::new(on_select),
+            width,
+            machines: Vec::new(),
+            busy: HashSet::new(),
+            current: String::new(),
+            on_select: Rc::new(on_select),
+            on_toggle: Rc::new(|_, _, _| {}),
         }
     }
 
-    /// The engine state as a colored dot and a short label.
-    fn render_engine(&self, cx: &App) -> impl IntoElement {
+    pub fn machines(
+        mut self,
+        machines: Vec<Machine>,
+        busy: HashSet<String>,
+        current: String,
+        on_toggle: impl Fn(&str, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.machines = machines;
+        self.busy = busy;
+        self.current = current;
+        self.on_toggle = Rc::new(on_toggle);
+        self
+    }
+
+    fn heading(label: &'static str, cx: &App) -> Div {
         let t = cx.theme();
-        let (color, label) = match self.engine {
-            EngineStatus::Connected => (t.green, "Colima is running"),
-            EngineStatus::Connecting => (t.yellow, "Connecting…"),
-            EngineStatus::NotRunning => (t.muted_foreground, "Colima is stopped"),
-            EngineStatus::Error(_) => (t.red, "Engine error"),
-        };
-        h_flex()
-            .gap_2()
+        div()
             .px_2()
-            .py_2()
-            .text_xs()
+            .pt_4()
+            .pb_1()
+            .text_size(px(text::SUBHEADLINE))
+            .font_weight(FontWeight::SEMIBOLD)
             .text_color(t.muted_foreground)
-            .child(div().size(px(7.)).rounded_full().bg(color))
             .child(label)
+    }
+
+    /// The row style that the sections and the machines share.
+    fn item(id: impl Into<ElementId>, active: bool, cx: &App) -> Stateful<Div> {
+        let t = cx.theme();
+        let accent = t.sidebar_accent;
+        h_flex()
+            .id(id)
+            .h(px(28.))
+            .gap_2p5()
+            .px_2()
+            .rounded(px(7.))
+            .text_size(px(text::BODY))
+            .text_color(t.sidebar_foreground)
+            // As in the system sidebars, the selected row has a fill and no
+            // bold text. A hovered row has a lighter fill of the same color.
+            .map(|d| {
+                if active {
+                    d.bg(accent).text_color(t.sidebar_accent_foreground)
+                } else {
+                    d.hover(|s| s.bg(accent.opacity(0.5)))
+                }
+            })
+    }
+
+    fn render_section(&self, section: Section, cx: &App) -> impl IntoElement {
+        let active = section == self.active;
+        let on_select = self.on_select.clone();
+        Self::item(section.label(), active, cx)
+            .child(Icon::new(section.icon()).small().text_color(native::accent(cx)))
+            .child(div().flex_1().child(section.label()))
+            // Select on the press, so the answer is immediate.
+            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                on_select(section, window, cx)
+            })
+    }
+
+    fn render_machine(&self, ix: usize, machine: &Machine, cx: &App) -> impl IntoElement {
+        let t = cx.theme();
+        let running = machine.is_running();
+        let busy = self.busy.contains(&machine.name);
+        let current = machine.name == self.current;
+        let on_toggle = self.on_toggle.clone();
+        let name = machine.name.clone();
+        let power = Button::new(("power", ix))
+            .icon(Icon::new(IconName::Power))
+            .ghost()
+            .xsmall()
+            .tooltip(if running { "Stop the machine" } else { "Start the machine" })
+            .on_click(move |_, window, cx| {
+                cx.stop_propagation();
+                on_toggle(&name, window, cx)
+            });
+        let group: SharedString = format!("machine-{ix}").into();
+        Self::item(("machine", ix), current, cx)
+            .group(group.clone())
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .when(!running, |d| d.text_color(t.muted_foreground))
+                    .child(machine.name.clone()),
+            )
+            .map(|d| {
+                if busy {
+                    d.child(Spinner::new().xsmall().color(t.muted_foreground))
+                } else if running {
+                    d.child(power)
+                } else {
+                    // "off" changes to the power button on hover.
+                    d.child(
+                        div()
+                            .relative()
+                            .flex()
+                            .justify_end()
+                            .child(
+                                div()
+                                    .text_size(px(text::SUBHEADLINE))
+                                    .text_color(t.muted_foreground)
+                                    .group_hover(group.clone(), |s| s.invisible())
+                                    .child("off"),
+                            )
+                            .child(
+                                div()
+                                    .absolute()
+                                    .right_0()
+                                    .top(px(-4.))
+                                    .invisible()
+                                    .group_hover(group, |s| s.visible())
+                                    .child(power),
+                            ),
+                    )
+                }
+            })
     }
 }
 
 impl RenderOnce for Sidebar {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let t = cx.theme();
-        let engine = self.render_engine(cx);
-        let on_select = self.on_select.clone();
-        v_flex()
-            .w(px(212.))
-            .h_full()
-            .flex_shrink_0()
+        let panel = v_flex()
+            .size_full()
+            .rounded(px(SIDEBAR_RADIUS))
             .bg(t.sidebar)
-            .border_r_1()
+            .border_1()
             .border_color(t.sidebar_border)
             // The traffic lights sit in this area.
-            .child(drag_area("sidebar-drag").w_full().h(px(TOOLBAR_HEIGHT)).flex_shrink_0())
+            .child(drag_area("sidebar-drag").w_full().h(px(TOOLBAR_HEIGHT - SIDEBAR_INSET)).flex_shrink_0())
             .child(
                 v_flex()
+                    .id("sidebar-scroll")
                     .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
                     .px_2p5()
+                    .pb_2()
                     .gap_px()
-                    .child(
-                        div()
-                            .px_2()
-                            .pb_1()
-                            .text_xs()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(t.muted_foreground)
-                            .child("Docker"),
-                    )
-                    .children(Section::ALL.into_iter().map(|section| {
-                        let active = section == self.active;
-                        let on_select = on_select.clone();
-                        h_flex()
-                            .id(section.label())
-                            .h(px(30.))
-                            .gap_2p5()
-                            .px_2()
-                            .rounded(px(7.))
-                            .text_sm()
-                            .text_color(t.sidebar_foreground)
-                            .when(active, |d| {
-                                d.bg(t.sidebar_accent)
-                                    .text_color(t.sidebar_accent_foreground)
-                                    .font_weight(FontWeight::MEDIUM)
-                            })
-                            .when(!active, |d| {
-                                d.hover(|d| d.bg(t.sidebar_accent.opacity(0.5)))
-                                    .active(|d| d.bg(t.sidebar_accent.opacity(0.8)))
-                            })
-                            .child(
-                                Icon::new(section.icon())
-                                    .small()
-                                    .text_color(if active { t.primary } else { t.muted_foreground }),
-                            )
-                            .child(div().flex_1().child(section.label()))
-                            .when(section == Section::Containers && self.running > 0, |d| {
-                                d.child(
-                                    div()
-                                        .text_xs()
-                                        .font_features(tabular_nums())
-                                        .text_color(t.muted_foreground)
-                                        .child(self.running.to_string()),
-                                )
-                            })
-                            // Select on the press, so the answer is immediate.
-                            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                                on_select(section, window, cx)
-                            })
-                    })),
-            )
-            .child(div().px_2p5().pb_2().child(engine))
+                    .child(Self::heading("Docker", cx).pt_0())
+                    .children(Section::DOCKER.map(|s| self.render_section(s, cx)))
+                    .child(Self::heading("Kubernetes", cx))
+                    .children(Section::KUBERNETES.map(|s| self.render_section(s, cx)))
+                    .when(!self.machines.is_empty(), |d| {
+                        d.child(Self::heading("Machines", cx)).children(
+                            self.machines
+                                .iter()
+                                .enumerate()
+                                .map(|(ix, m)| self.render_machine(ix, m, cx)),
+                        )
+                    }),
+            );
+        div()
+            .relative()
+            .w(self.width + px(2. * SIDEBAR_INSET))
+            .h_full()
+            .flex_shrink_0()
+            .p(px(SIDEBAR_INSET))
+            .bg(t.background)
+            .child(panel)
     }
 }

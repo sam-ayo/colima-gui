@@ -1,13 +1,13 @@
+mod assets;
 mod colima;
 mod docker;
 mod runtime;
 mod state;
+mod terminal;
 mod ui;
 
 use gpui::*;
-use gpui_component::{Root, Theme};
-
-actions!(colima_gui, [Quit]);
+use gpui_component::Root;
 
 fn main() {
     tracing_subscriber::fmt()
@@ -21,16 +21,16 @@ fn main() {
     let early = state::container_store::EarlyConnect::start(&backend);
 
     gpui_platform::application()
-        .with_assets(gpui_kit_assets::AllAssets)
+        .with_assets(assets::Assets)
         .run(|cx: &mut App| {
             cx.set_global(backend);
             cx.set_global(early);
             gpui_component::init(cx);
             ui::image_icon::LogoStore::init(cx);
             ui::sync_reduce_motion(cx);
+            ui::app_view::bind_keys(cx);
             ui::container_list::bind_keys(cx);
-            cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
-            cx.on_action(|_: &Quit, cx| cx.quit());
+            ui::native::init_menus(cx);
             cx.on_window_closed(|cx, _| cx.quit()).detach();
 
             let bounds = Bounds::centered(None, size(px(1240.), px(780.)), cx);
@@ -39,7 +39,7 @@ fn main() {
                 // The sidebar and the toolbars fill the title bar area. The
                 // views move the window themselves (see `ui::drag_area`).
                 titlebar: Some(TitlebarOptions {
-                    title: Some("Colima".into()),
+                    title: Some(ui::native::APP_NAME.into()),
                     appears_transparent: true,
                     traffic_light_position: Some(point(px(18.), px(18.))),
                 }),
@@ -48,7 +48,8 @@ fn main() {
                 ..Default::default()
             };
             cx.open_window(options, |window, cx| {
-                Theme::sync_system_appearance(Some(window), cx);
+                ui::native::sync_theme(window, cx);
+                ui::native::autosave_frame(window, cx);
                 let view = cx.new(|cx| ui::app_view::AppView::new(window, cx));
                 cx.new(|cx| Root::new(view, window, cx))
             })

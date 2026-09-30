@@ -12,6 +12,8 @@ use bollard::query_parameters::{
 
 pub const COMPOSE_PROJECT_LABEL: &str = "com.docker.compose.project";
 pub const COMPOSE_SERVICE_LABEL: &str = "com.docker.compose.service";
+/// The Compose files of the project, separated by commas.
+pub const COMPOSE_FILES_LABEL: &str = "com.docker.compose.project.config_files";
 /// An icon URL for the container. OrbStack reads the same label.
 pub const ICON_LABEL: &str = "dev.orbstack.icon";
 
@@ -57,9 +59,11 @@ pub struct ContainerRow {
     pub image: String,
     pub state: State,
     pub status: String,
-    pub ports: String,
+    pub ports: Vec<Port>,
     pub compose_project: Option<String>,
     pub compose_service: Option<String>,
+    /// The main Compose file of the project: the first file in the label.
+    pub compose_file: Option<String>,
     pub icon: Option<String>,
     pub created: i64,
 }
@@ -67,6 +71,61 @@ pub struct ContainerRow {
 impl ContainerRow {
     pub fn short_id(&self) -> &str {
         &self.id[..self.id.len().min(12)]
+    }
+
+    /// True for a dead container, or one that exited with an error code.
+    /// Docker writes the code in the status, for example "Exited (1) 4
+    /// minutes ago".
+    pub fn failed(&self) -> bool {
+        match self.state {
+            State::Dead => true,
+            State::Exited => exit_code(&self.status).is_some_and(|c| c != 0),
+            _ => false,
+        }
+    }
+
+    /// The status in two parts: the state and the time. "Up 2 hours" gives
+    /// ("Running", "2 hours"), and "Exited (1) 4 minutes ago" gives
+    /// ("Exited (1)", "4 minutes ago").
+    pub fn status_parts(&self) -> (String, Option<String>) {
+        let s = self.status.as_str();
+        if let Some(rest) = s.strip_prefix("Up ") {
+            let head = if self.state == State::Paused { "Paused" } else { "Running" };
+            return (head.into(), Some(rest.trim_end_matches(" (Paused)").into()));
+        }
+        if s.starts_with("Exited (")
+            && let Some(end) = s.find(')')
+        {
+            let tail = s[end + 1..].trim();
+            return (s[..=end].into(), (!tail.is_empty()).then(|| tail.into()));
+        }
+        (s.into(), None)
+    }
+}
+
+/// Reads the code from an "Exited (N) …" status.
+fn exit_code(status: &str) -> Option<i64> {
+    let rest = status.strip_prefix("Exited (")?;
+    rest[..rest.find(')')?].parse().ok()
+}
+
+/// A container port that Docker publishes on the host.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Port {
+    pub public: u16,
+    pub private: u16,
+    pub proto: String,
+}
+
+impl Port {
+    /// The address on the host, for example "localhost:3000".
+    pub fn host(&self) -> String {
+        format!("localhost:{}", self.public)
+    }
+
+    /// The URL that opens the port in a browser. Only TCP ports have one.
+    pub fn url(&self) -> Option<String> {
+        (self.proto == "tcp").then(|| format!("http://localhost:{}", self.public))
     }
 }
 
@@ -84,32 +143,37 @@ impl From<ContainerSummary> for ContainerRow {
             image: c.image.unwrap_or_default(),
             state: c.state.into(),
             status: c.status.unwrap_or_default(),
-            ports: format_ports(c.ports.as_deref().unwrap_or_default()),
+            ports: published_ports(c.ports.as_deref().unwrap_or_default()),
             compose_project: labels.get(COMPOSE_PROJECT_LABEL).cloned(),
             compose_service: labels.get(COMPOSE_SERVICE_LABEL).cloned(),
+            compose_file: labels
+                .get(COMPOSE_FILES_LABEL)
+                .and_then(|files| files.split(',').next())
+                .map(|f| f.trim().to_string())
+                .filter(|f| !f.is_empty()),
             icon: labels.get(ICON_LABEL).cloned(),
             created: c.created.unwrap_or_default(),
         }
     }
 }
 
-/// Formats published ports as `host->container/proto`. Docker reports each
+/// Returns the published ports, sorted by host port. Docker reports each
 /// port one time for IPv4 and one time for IPv6, so duplicates are removed.
-pub fn format_ports(ports: &[PortSummary]) -> String {
-    let mut out: Vec<String> = Vec::new();
+pub fn published_ports(ports: &[PortSummary]) -> Vec<Port> {
+    let mut out: Vec<Port> = Vec::new();
     for p in ports {
         let Some(public) = p.public_port else { continue };
-        let proto = p.typ.map(|t| t.to_string()).unwrap_or_else(|| "tcp".into());
-        let s = if proto == "tcp" {
-            format!("{public}->{}", p.private_port)
-        } else {
-            format!("{public}->{}/{proto}", p.private_port)
+        let port = Port {
+            public,
+            private: p.private_port,
+            proto: p.typ.map(|t| t.to_string()).unwrap_or_else(|| "tcp".into()),
         };
-        if !out.contains(&s) {
-            out.push(s);
+        if !out.contains(&port) {
+            out.push(port);
         }
     }
-    out.join(", ")
+    out.sort_by_key(|p| p.public);
+    out
 }
 
 pub async fn list_all(docker: &Docker) -> Result<Vec<ContainerRow>> {
@@ -191,9 +255,58 @@ pub async fn run_action(docker: &Docker, id: &str, action: Action) -> Result<()>
     Ok(())
 }
 
-pub async fn inspect_json(docker: &Docker, id: &str) -> Result<String> {
+/// A mount of a container, from the inspect data.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Mount {
+    /// A host path for a bind mount, or the name of a volume.
+    pub source: String,
+    pub destination: String,
+    pub volume: bool,
+}
+
+/// The part of the inspect data that the list does not have.
+pub struct Details {
+    pub ip: Option<String>,
+    pub mounts: Vec<Mount>,
+    /// The full inspect data as pretty JSON.
+    pub json: String,
+}
+
+pub async fn inspect(docker: &Docker, id: &str) -> Result<Details> {
     let info = docker.inspect_container(id, None).await?;
-    Ok(serde_json::to_string_pretty(&info)?)
+    // A container can be on more than one network. Show the first address.
+    let ip = info
+        .network_settings
+        .as_ref()
+        .and_then(|n| n.networks.as_ref())
+        .and_then(|nets| {
+            let mut ips: Vec<&String> = nets
+                .values()
+                .filter_map(|e| e.ip_address.as_ref())
+                .filter(|ip| !ip.is_empty())
+                .collect();
+            ips.sort();
+            ips.first().map(|ip| ip.to_string())
+        });
+    let mounts = info
+        .mounts
+        .iter()
+        .flatten()
+        .map(|m| {
+            let volume = m.typ.as_deref() == Some("volume");
+            let source = if volume { m.name.clone() } else { m.source.clone() };
+            Mount {
+                source: source.unwrap_or_default(),
+                destination: m.destination.clone().unwrap_or_default(),
+                volume,
+            }
+        })
+        .collect();
+    Ok(Details {
+        ip,
+        mounts,
+        json: serde_json::to_string_pretty(&info)?,
+    })
 }
 
 #[cfg(test)]
@@ -202,7 +315,39 @@ mod tests {
     use bollard::models::PortSummaryTypeEnum;
 
     #[test]
-    fn ports_are_deduplicated_and_formatted() {
+    fn status_splits_into_state_and_time() {
+        let mut row = ContainerRow {
+            id: String::new(),
+            name: String::new(),
+            image: String::new(),
+            state: State::Running,
+            status: "Up 2 hours".into(),
+            ports: Vec::new(),
+            compose_project: None,
+            compose_service: None,
+            compose_file: None,
+            icon: None,
+            created: 0,
+        };
+        assert_eq!(row.status_parts(), ("Running".into(), Some("2 hours".into())));
+        row.state = State::Exited;
+        row.status = "Exited (1) 4 minutes ago".into();
+        assert_eq!(row.status_parts(), ("Exited (1)".into(), Some("4 minutes ago".into())));
+        assert!(row.failed());
+        row.state = State::Created;
+        row.status = "Created".into();
+        assert_eq!(row.status_parts(), ("Created".into(), None));
+    }
+
+    #[test]
+    fn exit_codes_come_from_the_status() {
+        assert_eq!(exit_code("Exited (1) 4 minutes ago"), Some(1));
+        assert_eq!(exit_code("Exited (0) 2 hours ago"), Some(0));
+        assert_eq!(exit_code("Up 2 hours"), None);
+    }
+
+    #[test]
+    fn ports_are_deduplicated_and_sorted() {
         let p = |public: Option<u16>, private: u16, typ| PortSummary {
             ip: None,
             private_port: private,
@@ -215,6 +360,16 @@ mod tests {
             p(None, 443, PortSummaryTypeEnum::TCP),
             p(Some(53), 53, PortSummaryTypeEnum::UDP),
         ];
-        assert_eq!(format_ports(&ports), "8080->80, 53->53/udp");
+        let port = |public, private, proto: &str| Port {
+            public,
+            private,
+            proto: proto.into(),
+        };
+        assert_eq!(
+            published_ports(&ports),
+            vec![port(53, 53, "udp"), port(8080, 80, "tcp")]
+        );
+        assert_eq!(port(53, 53, "udp").url(), None);
+        assert_eq!(port(8080, 80, "tcp").url().as_deref(), Some("http://localhost:8080"));
     }
 }

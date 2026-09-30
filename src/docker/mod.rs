@@ -40,6 +40,21 @@ pub fn discover_socket() -> String {
     format!("unix://{}", default.display())
 }
 
+/// The Colima profile that owns the socket that the app uses. The sidebar
+/// marks this machine.
+pub fn current_profile() -> String {
+    std::env::var("DOCKER_HOST")
+        .ok()
+        .and_then(|host| profile_of(&host).map(str::to_string))
+        .unwrap_or_else(|| "default".into())
+}
+
+/// Reads "dev" from a socket such as `unix:///Users/me/.colima/dev/docker.sock`.
+fn profile_of(socket: &str) -> Option<&str> {
+    let rest = &socket[socket.find("/.colima/")? + "/.colima/".len()..];
+    rest.split('/').next().filter(|p| !p.is_empty())
+}
+
 /// Connects to the engine and checks it with `ping`.
 pub async fn connect() -> (Option<Docker>, EngineStatus) {
     let socket = discover_socket();
@@ -56,6 +71,17 @@ pub async fn connect() -> (Option<Docker>, EngineStatus) {
         Ok(Ok(_)) => (Some(docker), EngineStatus::Connected),
         // A socket file that does not answer stays after the VM stops.
         Ok(Err(_)) | Err(_) => (None, EngineStatus::NotRunning),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::profile_of;
+
+    #[test]
+    fn profile_comes_from_the_socket_path() {
+        assert_eq!(profile_of("unix:///Users/me/.colima/dev/docker.sock"), Some("dev"));
+        assert_eq!(profile_of("unix:///var/run/docker.sock"), None);
     }
 }
 

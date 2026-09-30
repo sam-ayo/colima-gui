@@ -5,7 +5,7 @@ use gpui_component::{ActiveTheme, v_flex};
 
 use crate::docker::stats::{Sample, format_bytes};
 use crate::state::stats_store::HISTORY_LEN;
-use crate::ui::tabular_nums;
+use crate::ui::{tabular_nums, text};
 
 #[derive(IntoElement)]
 pub struct StatsView {
@@ -84,7 +84,7 @@ fn card(title: &str, value: String, sub: String, body: impl IntoElement, cx: &Ap
                 .gap_0p5()
                 .child(
                     div()
-                        .text_xs()
+                        .text_size(px(text::SUBHEADLINE))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(t.muted_foreground)
                         .child(title.to_string()),
@@ -95,8 +95,8 @@ fn card(title: &str, value: String, sub: String, body: impl IntoElement, cx: &Ap
                         .items_baseline()
                         .gap_2()
                         .font_features(tabular_nums())
-                        .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).child(value))
-                        .child(div().text_xs().text_color(t.muted_foreground).child(sub)),
+                        .child(div().text_size(px(text::TITLE2)).font_weight(FontWeight::SEMIBOLD).child(value))
+                        .child(div().text_size(px(text::CALLOUT)).text_color(t.muted_foreground).child(sub)),
                 ),
         )
         .child(body)
@@ -151,7 +151,7 @@ impl RenderOnce for StatsView {
             ))
             .child(
                 div()
-                    .text_xs()
+                    .text_size(px(text::SUBHEADLINE))
                     .text_color(t.muted_foreground)
                     .child("The last 60 seconds. One sample each second."),
             )

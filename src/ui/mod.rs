@@ -3,6 +3,7 @@ pub mod container_detail;
 pub mod container_list;
 pub mod image_icon;
 pub mod logs_view;
+pub mod native;
 pub mod sidebar;
 pub mod stats_view;
 
@@ -17,6 +18,33 @@ use crate::docker::containers::State;
 /// The height of the toolbars. The toolbars fill the area of the title bar,
 /// so the traffic lights sit on the same line as the toolbar content.
 pub const TOOLBAR_HEIGHT: f32 = 52.;
+
+/// The width of the sidebar panel.
+pub const SIDEBAR_WIDTH: f32 = 220.;
+/// The space between the sidebar panel and the edges of the window. The
+/// panel floats in the window, as the sidebars of macOS 26 do.
+pub const SIDEBAR_INSET: f32 = 8.;
+/// The corner radius of the sidebar panel. It is concentric with the
+/// corners of the window.
+pub const SIDEBAR_RADIUS: f32 = 18.;
+
+/// The text sizes of macOS, in points. GPUI sizes text in rems of 16 px,
+/// which is larger than the 13 pt body text of the system.
+pub mod text {
+    /// The value of a statistic and the title of a pane.
+    pub const TITLE2: f32 = 17.;
+    /// The title of a toolbar.
+    pub const TITLE3: f32 = 15.;
+    /// The body text: the list rows, the sidebar, and the labels.
+    pub const BODY: f32 = 13.;
+    /// The secondary lines below a row title.
+    pub const CALLOUT: f32 = 12.;
+    /// The section headings of the sidebar, and small details.
+    pub const SUBHEADLINE: f32 = 11.;
+}
+
+/// The height of a push button with a label, as in the AppKit forms.
+pub const NATIVE_BUTTON_HEIGHT: f32 = 28.;
 
 /// A load that ends before this time shows no spinner. A spinner that shows
 /// for one frame looks like a fault.

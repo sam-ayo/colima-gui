@@ -10,14 +10,14 @@ use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::scroll::Scrollbar;
 use gpui_component::spinner::Spinner;
-use gpui_component::{ActiveTheme, Icon, Sizable as _, WindowExt as _, h_flex, v_flex};
+use gpui_component::{ActiveTheme, Icon, Selectable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit_assets::IconName;
 
 use crate::docker::containers::Action;
-use crate::docker::stats::format_bytes;
 use crate::state::container_store::{ContainerStore, ListItem, StoreEvent, build_list};
-use crate::state::stats_store::{MAX_VISIBLE_STREAMS, StatsStore, select_wanted};
-use crate::ui::{SNAPPY_SPRING, TOOLBAR_HEIGHT, delayed_reveal, drag_area, tabular_nums};
+use crate::state::stats_store::{StatsStore, select_wanted};
+use crate::ui::native::MenuEntry;
+use crate::ui::{SNAPPY_SPRING, TOOLBAR_HEIGHT, native, text, delayed_reveal, drag_area, tabular_nums};
 
 actions!(
     container_list,
@@ -29,13 +29,26 @@ actions!(
         SelectNext,
         SelectPrev,
         FocusSearch,
-        ClearSelection
+        ClearSelection,
+        ToggleRunningOnly
     ]
 );
 
 const CONTEXT: &str = "ContainerList";
-const ROW_HEIGHT: f32 = 44.;
+const ROW_HEIGHT: f32 = 54.;
 const NAME_MIN_WIDTH: f32 = 170.;
+const ICON_SIZE: f32 = 32.;
+/// The left space of a row. The chevron of a group sits in it, so the
+/// icons of all rows align.
+const GUTTER: f32 = 34.;
+/// The x position of the tree line, in the row: the center of the group
+/// tile.
+const TREE_X: f32 = ROW_INSET + GUTTER + ICON_SIZE / 2.;
+/// The left edge of a service row. It starts right of the tree line, so a
+/// selected row does not cover the line.
+const CHILD_INSET: f32 = TREE_X + 6.;
+const PORTS_WIDTH: f32 = 150.;
+const ACTIONS_WIDTH: f32 = 80.;
 /// The space between the list edge and the rounded row background.
 const ROW_INSET: f32 = 8.;
 const ROW_GROUP: &str = "container-row";
@@ -51,6 +64,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("up", SelectPrev, Some(CONTEXT)),
         KeyBinding::new("cmd-f", FocusSearch, Some(CONTEXT)),
         KeyBinding::new("escape", ClearSelection, Some(CONTEXT)),
+        KeyBinding::new("cmd-shift-r", ToggleRunningOnly, Some(CONTEXT)),
     ]);
 }
 
@@ -68,7 +82,12 @@ pub struct ContainerList {
     collapsed: HashSet<String>,
     items: Rc<Vec<ListItem>>,
     selected: Option<String>,
-    visible: Range<usize>,
+    search_open: bool,
+    /// Show only the containers that run.
+    running_only: bool,
+    /// Extra space at the left of the toolbar. The sidebar button uses this
+    /// space when the sidebar is collapsed.
+    leading_inset: Pixels,
     _subs: Vec<Subscription>,
 }
 
@@ -99,8 +118,6 @@ impl ContainerList {
                     this.rebuild(cx);
                 }
             }),
-            // The stats store notifies at most one time each second.
-            cx.observe(&stats, |_, _, cx| cx.notify()),
         ];
         let mut this = ContainerList {
             store,
@@ -111,17 +128,34 @@ impl ContainerList {
             collapsed: HashSet::new(),
             items: Rc::new(Vec::new()),
             selected: None,
-            visible: 0..0,
+            search_open: false,
+            running_only: false,
+            leading_inset: px(0.),
             _subs: subs,
         };
         this.rebuild(cx);
         this
     }
 
+    pub fn leading_inset(&self) -> Pixels {
+        self.leading_inset
+    }
+
+    pub fn set_leading_inset(&mut self, inset: Pixels, cx: &mut Context<Self>) {
+        self.leading_inset = inset;
+        cx.notify();
+    }
+
     fn rebuild(&mut self, cx: &mut Context<Self>) {
         let filter = self.search.read(cx).value();
         let store = self.store.read(cx);
-        self.items = Rc::new(build_list(store.set.rows.values(), &filter, &self.collapsed));
+        let running_only = self.running_only;
+        let rows = store
+            .set
+            .rows
+            .values()
+            .filter(|r| !running_only || r.state.is_running());
+        self.items = Rc::new(build_list(rows, &filter, &self.collapsed));
         // Clear a selection that points to a removed container.
         if let Some(sel) = &self.selected
             && !store.set.rows.contains_key(sel) {
@@ -131,26 +165,15 @@ impl ContainerList {
         cx.notify();
     }
 
-    /// Opens stats streams for the visible running rows and the selection.
+    /// Opens a stats stream for the selection, if it runs. The detail pane
+    /// shows the values.
     fn sync_stats(&mut self, cx: &mut Context<Self>) {
         let store = self.store.read(cx);
-        // The list can be shorter than the last visible range.
-        let end = self.visible.end.min(self.items.len());
-        let start = self.visible.start.min(end);
-        let visible: Vec<String> = self.items[start..end]
-            .iter()
-            .filter_map(|item| match item {
-                ListItem::Row { id, .. } => Some(id),
-                ListItem::Group { .. } => None,
-            })
-            .filter(|id| store.set.rows.get(*id).is_some_and(|r| r.state.is_running()))
-            .cloned()
-            .collect();
         let selected = self
             .selected
             .as_deref()
             .filter(|id| store.set.rows.get(*id).is_some_and(|r| r.state.is_running()));
-        let wanted = select_wanted(&visible, selected, MAX_VISIBLE_STREAMS);
+        let wanted = select_wanted(&[], selected, 0);
         let docker = store.docker().cloned();
         self.stats
             .update(cx, |stats, cx| stats.set_wanted(docker.as_ref(), wanted, cx));
@@ -225,37 +248,21 @@ impl ContainerList {
             .get(&id)
             .map(|r| r.name.clone())
             .unwrap_or_default();
-        window.open_alert_dialog(cx, move |alert, _, _| {
-            let store = store.clone();
-            let id = id.clone();
-            alert
-                .title(format!("Remove {name}?"))
-                .description("The container stops and Docker deletes it. You cannot undo this.")
-                .ok_text("Remove")
-                .ok_variant(gpui_component::button::ButtonVariant::Danger)
-                .show_cancel(true)
-                .on_ok(move |_, _, cx| {
-                    store.update(cx, |s, cx| s.run_action(&id, Action::Remove, cx));
-                    true
-                })
-        });
-    }
-
-    fn render_header(&self, cx: &App) -> impl IntoElement {
-        let t = cx.theme();
-        h_flex()
-            .h(px(28.))
-            .px(px(ROW_INSET + 10.))
-            .gap_2()
-            .text_xs()
-            .font_weight(FontWeight::MEDIUM)
-            .text_color(t.muted_foreground)
-            .child(div().flex_1().min_w(px(NAME_MIN_WIDTH)).pl(px(36.)).child("Name"))
-            .child(div().w(px(200.)).child("Image"))
-            .child(div().w(px(130.)).child("Ports"))
-            .child(div().w(px(56.)).text_right().child("CPU"))
-            .child(div().w(px(76.)).text_right().child("Memory"))
-            .child(div().w(px(92.)))
+        // A sheet on the window, as AppKit shows it. The destructive button
+        // is not the default, so Return does not remove the container.
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &format!("Remove “{name}”?"),
+            Some("The container stops and Docker deletes it. You cannot undo this."),
+            &[PromptButton::Cancel("Cancel".into()), PromptButton::new("Remove")],
+            cx,
+        );
+        cx.spawn(async move |_, cx| {
+            if answer.await == Ok(1) {
+                store.update(cx, |s, cx| s.run_action(&id, Action::Remove, cx));
+            }
+        })
+        .detach();
     }
 
     fn render_item(&self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -266,13 +273,77 @@ impl ContainerList {
                 running,
                 collapsed,
             } => self.render_group(ix, project, *total, *running, *collapsed, window, cx),
-            ListItem::Row { id, grouped } => self.render_row(ix, id, *grouped, cx),
+            ListItem::Row { id, grouped } => self.render_row(ix, id, *grouped, window, cx),
         };
+        // A line separates the Compose projects from the single containers.
+        let divider = matches!(self.items[ix], ListItem::Row { grouped: false, .. })
+            && ix > 0
+            && matches!(
+                self.items[ix - 1],
+                ListItem::Row { grouped: true, .. } | ListItem::Group { .. }
+            );
+        // The tree lines join the services to their project.
+        let next_is_child = matches!(self.items.get(ix + 1), Some(ListItem::Row { grouped: true, .. }));
+        let tree = match &self.items[ix] {
+            ListItem::Group { .. } if next_is_child => Some(Tree::Stem),
+            ListItem::Row { grouped: true, .. } if next_is_child => Some(Tree::Branch),
+            ListItem::Row { grouped: true, .. } => Some(Tree::Last),
+            _ => None,
+        };
+        let t = cx.theme();
+        let line = t.muted_foreground.opacity(0.35);
+        let mid = ROW_HEIGHT / 2.;
         div()
+            .relative()
             .w_full()
             .h(px(ROW_HEIGHT))
             .px(px(ROW_INSET))
             .py_px()
+            .when(divider, |d| {
+                d.pt(px(4.)).child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left(px(ROW_INSET + 10.))
+                        .right(px(ROW_INSET + 10.))
+                        .h_px()
+                        .bg(t.border),
+                )
+            })
+            .when_some(tree, |d, tree| {
+                // The line from the bottom of the group tile to the next row.
+                let stem = div()
+                    .absolute()
+                    .left(px(TREE_X))
+                    .top(px((ROW_HEIGHT + ICON_SIZE) / 2.))
+                    .bottom_0()
+                    .w_px()
+                    .bg(line);
+                // A rounded elbow into the icon of the service.
+                let elbow = div()
+                    .absolute()
+                    .left(px(TREE_X))
+                    .top_0()
+                    .w(px(CHILD_INSET + 6. - TREE_X))
+                    .h(px(mid))
+                    .border_l_1()
+                    .border_b_1()
+                    .rounded_bl(px(6.))
+                    .border_color(line);
+                // The line that continues to the services below.
+                let rest = div()
+                    .absolute()
+                    .left(px(TREE_X))
+                    .top(px(mid))
+                    .bottom_0()
+                    .w_px()
+                    .bg(line);
+                match tree {
+                    Tree::Stem => d.child(stem),
+                    Tree::Branch => d.child(elbow).child(rest),
+                    Tree::Last => d.child(elbow),
+                }
+            })
             .child(item)
             .into_any_element()
     }
@@ -304,47 +375,92 @@ impl ContainerList {
                 }))
         };
         let toggle = p.clone();
+        let menu_project = p.clone();
+        let stopped = total - running;
+        let compose_file = self
+            .store
+            .read(cx)
+            .set
+            .rows
+            .values()
+            .find(|r| r.compose_project.as_deref() == Some(project))
+            .and_then(|r| r.compose_file.clone());
+        let summary = format!(
+            "{total} {} · {}",
+            if total == 1 { "container" } else { "containers" },
+            match (running, stopped) {
+                (_, 0) => "all running".to_string(),
+                (0, _) => "all stopped".to_string(),
+                _ => format!("{stopped} stopped"),
+            }
+        );
         h_flex()
             .id(("group", ix))
             .group(HEADER_GROUP)
             .size_full()
-            .px_2p5()
-            .gap_2()
+            .pr_2()
+            .gap_3()
             .rounded(px(8.))
-            .hover(|d| d.bg(t.table_hover))
-            .active(|d| d.bg(t.table_active.opacity(0.6)))
-            .child({
-                // The chevron turns to the new state and does not jump. A
-                // spring can reverse in the middle of a turn.
-                Icon::new(IconName::ChevronRight)
-                    .xsmall()
-                    .text_color(t.muted_foreground)
-                    .with_spring(
-                        "chevron",
-                        SpringAnimation::new(SNAPPY_SPRING).to(if collapsed { 0. } else { 1. }),
-                        |icon, turn: f32| {
-                            icon.rotate(radians(turn * std::f32::consts::FRAC_PI_2))
-                        },
-                    )
-            })
-            .child(Icon::new(IconName::Boxes).small().text_color(t.muted_foreground))
+            .hover(|s| s.bg(native::hover(cx)))
             .child(
-                div()
-                    .flex_1()
-                    .text_sm()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(project.to_string()),
+                div().w(px(GUTTER - 12.)).flex().justify_end().child(
+                    // The chevron turns to the new state and does not jump. A
+                    // spring can reverse in the middle of a turn.
+                    Icon::new(IconName::ChevronRight)
+                        .xsmall()
+                        .text_color(t.muted_foreground)
+                        .with_spring(
+                            "chevron",
+                            SpringAnimation::new(SNAPPY_SPRING).to(if collapsed { 0. } else { 1. }),
+                            |icon, turn: f32| {
+                                icon.rotate(radians(turn * std::f32::consts::FRAC_PI_2))
+                            },
+                        ),
+                ),
             )
             .child(
                 div()
-                    .text_xs()
-                    .font_features(tabular_nums())
-                    .text_color(t.muted_foreground)
-                    .child(format!("{running} of {total} running")),
+                    .size(px(ICON_SIZE))
+                    .flex_shrink_0()
+                    .rounded(px(8.))
+                    .bg(DOCKER_BLUE)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        svg()
+                            .path(crate::assets::DOCKER_LOGO)
+                            .size(px(20.))
+                            .text_color(gpui::white()),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(px(text::BODY))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(project.to_string()),
+                    )
+                    .child(
+                        h_flex()
+                            .min_w_0()
+                            .gap_1()
+                            .text_size(px(text::CALLOUT))
+                            .font_features(tabular_nums())
+                            .text_color(t.muted_foreground)
+                            .when_some(compose_file, |d, path| {
+                                d.child(compose_file_link(ix, path, cx)).child("·")
+                            })
+                            .child(div().truncate().child(summary)),
+                    ),
             )
             .child(
                 h_flex()
-                    .w(px(92.))
+                    .w(px(ACTIONS_WIDTH))
                     .justify_end()
                     .invisible()
                     .group_hover(HEADER_GROUP, |s| s.visible())
@@ -358,10 +474,97 @@ impl ContainerList {
                     )),
             )
             .on_click(cx.listener(move |this, _, _, cx| this.toggle_group(&toggle, cx)))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, _, window, cx| this.show_group_menu(&menu_project, window, cx)),
+            )
             .into_any_element()
     }
 
-    fn render_row(&self, ix: usize, id: &str, grouped: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn show_group_menu(&mut self, project: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let rows = &self.store.read(cx).set.rows;
+        let members = || rows.values().filter(|r| r.compose_project.as_deref() == Some(project));
+        let any_running = members().any(|r| r.state.is_running());
+        let any_stopped = members().any(|r| !r.state.is_running());
+        let compose_file = members().find_map(|r| r.compose_file.clone());
+        let mut entries = vec![
+            (MenuEntry::Item { label: "Start All".into(), enabled: any_stopped }, Some(Action::Start)),
+            (MenuEntry::Item { label: "Stop All".into(), enabled: any_running }, Some(Action::Stop)),
+            (MenuEntry::item("Restart All"), Some(Action::Restart)),
+        ];
+        if compose_file.is_some() {
+            entries.push((MenuEntry::Separator, None));
+            entries.push((MenuEntry::item("Show Compose File in Finder"), None));
+        }
+        let (entries, actions): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
+        let project = project.to_string();
+        native::show_context_menu(entries, window, cx, move |this, ix, _, cx| match actions[ix] {
+            Some(action) => this.store.update(cx, |s, cx| s.run_group_action(&project, action, cx)),
+            None => {
+                if let Some(path) = &compose_file {
+                    cx.reveal_path(std::path::Path::new(path));
+                }
+            }
+        });
+    }
+
+    fn show_row_menu(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(row) = self.store.read(cx).set.rows.get(&id).cloned() else {
+            return;
+        };
+        let running = row.state.is_running();
+        let url = row.ports.iter().find_map(|p| p.url());
+        type Handler = Box<dyn Fn(&mut ContainerList, &mut Window, &mut Context<ContainerList>)>;
+        let mut entries: Vec<(MenuEntry, Option<Handler>)> = Vec::new();
+        let action = |action: Action, id: &str| -> Option<Handler> {
+            let id = id.to_string();
+            Some(Box::new(move |this, window, cx| this.request_action(id.clone(), action, window, cx)))
+        };
+        if running {
+            entries.push((MenuEntry::item("Stop"), action(Action::Stop, &id)));
+        } else {
+            entries.push((MenuEntry::item("Start"), action(Action::Start, &id)));
+        }
+        entries.push((MenuEntry::item("Restart"), action(Action::Restart, &id)));
+        entries.push((MenuEntry::Separator, None));
+        if let Some(url) = url {
+            let label = format!("Open {url}");
+            entries.push((MenuEntry::item(label), Some(Box::new(move |_, _, cx| cx.open_url(&url)))));
+        }
+        if let Some(path) = row.compose_file.clone() {
+            entries.push((
+                MenuEntry::item("Show Compose File in Finder"),
+                Some(Box::new(move |_, _, cx| cx.reveal_path(std::path::Path::new(&path)))),
+            ));
+        }
+        let name = row.name.clone();
+        entries.push((
+            MenuEntry::item("Copy Name"),
+            Some(Box::new(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(name.clone())))),
+        ));
+        let full_id = row.id.clone();
+        entries.push((
+            MenuEntry::item("Copy ID"),
+            Some(Box::new(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(full_id.clone())))),
+        ));
+        entries.push((MenuEntry::Separator, None));
+        entries.push((MenuEntry::item("Remove…"), action(Action::Remove, &id)));
+        let (entries, handlers): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
+        native::show_context_menu(entries, window, cx, move |this, ix, window, cx| {
+            if let Some(Some(handler)) = handlers.get(ix) {
+                handler(this, window, cx);
+            }
+        });
+    }
+
+    fn render_row(
+        &self,
+        ix: usize,
+        id: &str,
+        grouped: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let store = self.store.read(cx);
         let Some(row) = store.set.rows.get(id) else {
             return div().h(px(ROW_HEIGHT)).into_any_element();
@@ -369,7 +572,12 @@ impl ContainerList {
         let t = cx.theme();
         let pending = store.set.pending.get(id).copied();
         let selected = self.selected.as_deref() == Some(id);
-        let sample = self.stats.read(cx).latest(id).copied();
+        // A selected row in the focused list of the active window has the
+        // accent fill and white text, as in the AppKit lists. In other
+        // cases, the fill is gray and the text keeps its colors.
+        let emphasized = window.is_window_active() && self.focus.contains_focused(window, cx);
+        let on_accent = selected && emphasized && native::has_emphasized_selection(cx);
+        let secondary = if on_accent { gpui::white().opacity(0.8) } else { t.muted_foreground };
         let running = row.state.is_running();
         let dot = super::state_color(row.state, cx);
 
@@ -377,7 +585,8 @@ impl ContainerList {
             let id = id.to_string();
             Button::new((name, ix))
                 .icon(icon)
-                .ghost()
+                .when(selected, |b| b.outline())
+                .when(!selected, |b| b.ghost())
                 .xsmall()
                 .tooltip(tip)
                 .on_click(cx.listener(move |this, _, window, cx| {
@@ -389,25 +598,21 @@ impl ContainerList {
         let actions = match pending {
             Some(action) => h_flex()
                 .gap_1()
-                .text_xs()
+                .text_size(px(text::CALLOUT))
                 .text_color(t.muted_foreground)
                 .child(Spinner::new().xsmall())
                 .child(action.pending_label())
                 .into_any_element(),
             None => h_flex()
+                .gap_1()
                 // The actions show on hover and on the selected row only.
                 .when(!selected, |d| d.invisible().group_hover(ROW_GROUP, |s| s.visible()))
-                .when(running, |d| {
-                    d.child(action_button(IconName::Square, "stop", "Stop (⌘.)", Action::Stop))
-                        .child(action_button(
-                            IconName::RotateCcw,
-                            "restart",
-                            "Restart (⌘R)",
-                            Action::Restart,
-                        ))
-                })
-                .when(!running, |d| {
-                    d.child(action_button(IconName::Play, "start", "Start (⌘↩)", Action::Start))
+                .map(|d| {
+                    if running {
+                        d.child(action_button(IconName::Square, "stop", "Stop (⌘.)", Action::Stop))
+                    } else {
+                        d.child(action_button(IconName::Play, "start", "Start (⌘↩)", Action::Start))
+                    }
                 })
                 .child(action_button(IconName::Trash, "remove", "Remove (⌘⌫)", Action::Remove))
                 .into_any_element(),
@@ -418,89 +623,189 @@ impl ContainerList {
         } else {
             row.name.clone()
         };
+        let failed = row.failed();
+        // A failed container shows why and when. The others show the image.
+        let status = match row.status_parts() {
+            _ if running => row.status.clone(),
+            (head, Some(time)) => format!("{head} · {time}"),
+            (head, None) => head,
+        };
+        let subtitle = if failed { status } else { format!("{} · {status}", row.image) };
         let row_id = id.to_string();
         h_flex()
             .id(("row", ix))
             .group(ROW_GROUP)
-            .size_full()
-            .px_2p5()
-            .gap_2()
-            .text_sm()
-            .rounded(px(8.))
-            .when(selected, |d| d.bg(t.table_active))
-            .when(!selected, |d| {
-                d.hover(|d| d.bg(t.table_hover))
-                    .active(|d| d.bg(t.table_active.opacity(0.6)))
+            .h_full()
+            .flex_1()
+            .map(|d| {
+                if grouped {
+                    d.ml(px(CHILD_INSET - ROW_INSET)).pl(px(12.))
+                } else {
+                    d.pl(px(GUTTER))
+                }
             })
+            .pr_2()
+            .gap_3()
+            .text_size(px(text::BODY))
+            .rounded(px(8.))
+            .map(|d| {
+                if selected {
+                    d.bg(native::selection(emphasized, cx))
+                } else {
+                    d.hover(|s| s.bg(native::hover(cx)))
+                }
+            })
+            .when(on_accent, |d| d.text_color(gpui::white()))
             .when(pending.is_some(), |d| d.opacity(0.7))
-            // One flexible column for the indent, the icon, and the name. All
-            // rows then have the same width here, so the columns align.
             .child(
-                h_flex()
+                super::image_icon::ContainerIcon::new(&row.image, row.icon.as_deref(), dot, running)
+                    .size(px(ICON_SIZE)),
+            )
+            .child(
+                v_flex()
                     .flex_1()
                     .min_w(px(NAME_MIN_WIDTH))
-                    .gap_2()
-                    .when(grouped, |d| d.pl_4())
-                    .child(super::image_icon::ContainerIcon::new(&row.image, row.icon.as_deref(), dot, running))
+                    .overflow_hidden()
                     .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .child(div().truncate().font_weight(FontWeight::MEDIUM).child(name))
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_xs()
-                                    .text_color(t.muted_foreground)
-                                    .child(row.status.clone()),
-                            ),
+                        div()
+                            .truncate()
+                            .font_weight(FontWeight::MEDIUM)
+                            .when(!running, |d| d.text_color(secondary))
+                            .child(name),
+                    )
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(px(text::CALLOUT))
+                            .text_color(if failed && !on_accent { t.red } else { secondary })
+                            .child(subtitle),
                     ),
             )
             .child(
                 div()
-                    .w(px(200.))
-                    .truncate()
-                    .text_color(t.muted_foreground)
-                    .child(row.image.clone()),
-            )
-            .child(
-                div()
-                    .w(px(130.))
-                    .truncate()
-                    .text_xs()
-                    .text_color(t.muted_foreground)
-                    .child(row.ports.clone()),
-            )
-            .child(
-                div()
-                    .w(px(56.))
-                    .text_right()
-                    .text_xs()
-                    .font_features(tabular_nums())
-                    .child(match (running, sample) {
-                        (true, Some(s)) => format!("{:.1}%", s.cpu_percent),
-                        _ => "–".into(),
+                    .w(px(PORTS_WIDTH))
+                    .flex_shrink_0()
+                    .when_some(row.ports.first(), |d, port| {
+                        d.child(port_link(("port", ix), port, row.ports.len() - 1, on_accent, cx))
                     }),
             )
-            .child(
-                div()
-                    .w(px(76.))
-                    .text_right()
-                    .text_xs()
-                    .font_features(tabular_nums())
-                    .child(match (running, sample) {
-                        (true, Some(s)) => format_bytes(s.mem_bytes),
-                        _ => "–".into(),
-                    }),
+            .child(h_flex().w(px(ACTIONS_WIDTH)).flex_shrink_0().justify_end().child(actions))
+            .on_click({
+                let row_id = row_id.clone();
+                cx.listener(move |this, _, window, cx| {
+                    this.focus.focus(window, cx);
+                    this.select(Some(row_id.clone()), true, cx);
+                })
+            })
+            // A right click selects the row, then shows its actions.
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, _, window, cx| {
+                    this.focus.focus(window, cx);
+                    this.select(Some(row_id.clone()), true, cx);
+                    this.show_row_menu(row_id.clone(), window, cx);
+                }),
             )
-            .child(h_flex().w(px(92.)).justify_end().child(actions))
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.focus.focus(window, cx);
-                this.select(Some(row_id.clone()), true, cx);
-            }))
             .into_any_element()
     }
+
+    fn toggle_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search_open = !self.search_open;
+        if self.search_open {
+            self.search.update(cx, |s, cx| s.focus(window, cx));
+        } else {
+            // A hidden search must not filter the list.
+            self.search.update(cx, |s, cx| s.set_value("", window, cx));
+            self.focus.focus(window, cx);
+        }
+        cx.notify();
+    }
+}
+
+/// The color of the Docker logo.
+const DOCKER_BLUE: Hsla = Hsla {
+    h: 206. / 360.,
+    s: 0.93,
+    l: 0.52,
+    a: 1.,
+};
+
+#[derive(Clone, Copy)]
+enum Tree {
+    /// A group that has services below it.
+    Stem,
+    /// A service that has more services below it.
+    Branch,
+    /// The last service of a group.
+    Last,
+}
+
+/// The name of the main Compose file. A click shows the file in Finder.
+fn compose_file_link(ix: usize, path: String, cx: &App) -> impl IntoElement {
+    let t = cx.theme();
+    let name = std::path::Path::new(&path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.clone());
+    let tip = path.clone();
+    h_flex()
+        .id(("compose-file", ix))
+        .flex_shrink_0()
+        .gap_1()
+        .cursor_pointer()
+        .hover(|d| d.text_color(t.foreground))
+        .child(Icon::new(IconName::FileCode).xsmall())
+        .child(name)
+        .tooltip(move |window, cx| {
+            gpui_component::tooltip::Tooltip::new(format!("Show {tip} in Finder")).build(window, cx)
+        })
+        .on_click(move |_, _, cx| {
+            cx.stop_propagation();
+            cx.reveal_path(std::path::Path::new(&path));
+        })
+}
+
+/// A published port as a link that opens in the browser. `more` is the
+/// number of other ports, which show as "+N".
+pub fn port_link(
+    id: impl Into<ElementId>,
+    port: &crate::docker::containers::Port,
+    more: usize,
+    on_accent: bool,
+    cx: &App,
+) -> impl IntoElement {
+    let t = cx.theme();
+    let url = port.url();
+    // On the accent fill of a selected row, the link is white.
+    let (color, secondary) = if on_accent {
+        (gpui::white(), gpui::white().opacity(0.8))
+    } else {
+        (t.link, t.muted_foreground)
+    };
+    h_flex()
+        .id(id)
+        .gap_1()
+        .text_size(px(text::BODY))
+        .text_color(color)
+        .child(Icon::new(IconName::Link).xsmall())
+        .child(port.host())
+        .when(more > 0, |d| {
+            d.child(div().text_size(px(text::CALLOUT)).text_color(secondary).child(format!("+{more}")))
+        })
+        .when_some(url, |d, url| {
+            d.cursor_pointer()
+                .hover(|d| d.underline())
+                .tooltip(move |window, cx| {
+                    gpui_component::tooltip::Tooltip::new(format!("Open {url}")).build(window, cx)
+                })
+                .on_click({
+                    let url = port.url().unwrap_or_default();
+                    move |_, _, cx| {
+                        cx.stop_propagation();
+                        cx.open_url(&url);
+                    }
+                })
+        })
 }
 
 impl Render for ContainerList {
@@ -509,6 +814,7 @@ impl Render for ContainerList {
         let store = self.store.read(cx);
         let total = store.set.rows.len();
         let running = store.set.rows.values().filter(|r| r.state.is_running()).count();
+        let stopped = total - running;
         let loading = store.is_loading();
         let count = self.items.len();
 
@@ -523,6 +829,8 @@ impl Render for ContainerList {
                     delayed_reveal("list-loading", div().child(Spinner::new())).into_any_element()
                 } else if total == 0 {
                     div().child("No containers").into_any_element()
+                } else if self.running_only && running == 0 {
+                    div().child("No containers run").into_any_element()
                 } else {
                     div().child("No containers match the search").into_any_element()
                 })
@@ -537,14 +845,6 @@ impl Render for ContainerList {
                         "containers",
                         count,
                         cx.processor(|this, range: Range<usize>, window, cx| {
-                            if range != this.visible {
-                                this.visible = range.clone();
-                                // Change the streams after this frame, not in it.
-                                let weak = cx.weak_entity();
-                                window.defer(cx, move |_, cx| {
-                                    let _ = weak.update(cx, |this, cx| this.sync_stats(cx));
-                                });
-                            }
                             range
                                 .map(|ix| this.render_item(ix, window, cx))
                                 .collect::<Vec<_>>()
@@ -578,44 +878,80 @@ impl Render for ContainerList {
             .on_action(cx.listener(|this, _: &ClearSelection, _, cx| {
                 this.select(None, false, cx)
             }))
+            .on_action(cx.listener(|this, _: &ToggleRunningOnly, _, cx| {
+                this.running_only = !this.running_only;
+                this.rebuild(cx);
+            }))
             .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
+                this.search_open = true;
                 this.search.update(cx, |s, cx| s.focus(window, cx));
+                cx.notify();
             }))
             .child(
                 h_flex()
-                    .h(px(TOOLBAR_HEIGHT))
+                    .h(px(TOOLBAR_HEIGHT + 8.))
                     .flex_shrink_0()
-                    .px_4()
-                    .gap_3()
+                    .px_5()
+                    .pl(px(20.) + self.leading_inset)
+                    .gap_1()
+                    .border_b_1()
+                    .border_color(t.border)
                     .child(
-                        h_flex()
-                            .items_baseline()
-                            .gap_2()
+                        v_flex()
                             .child(
                                 div()
-                                    .text_base()
+                                    .text_size(px(text::TITLE3))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .child("Containers"),
                             )
                             .child(
                                 div()
-                                    .text_xs()
+                                    .text_size(px(text::CALLOUT))
                                     .font_features(tabular_nums())
                                     .text_color(t.muted_foreground)
-                                    .child(format!("{running} of {total} running")),
+                                    .child(format!("{running} running · {stopped} stopped")),
                             ),
                     )
                     .child(drag_area("list-drag").flex_1().h_full())
+                    .when(self.search_open, |d| {
+                        d.child(
+                            div().w(px(220.)).mr_1().child(
+                                Input::new(&self.search)
+                                    .small()
+                                    .prefix(Icon::new(IconName::Search).small())
+                                    .cleanable(true),
+                            ),
+                        )
+                    })
                     .child(
-                        div().w(px(240.)).child(
-                            Input::new(&self.search)
-                                .small()
-                                .prefix(Icon::new(IconName::Search).small())
-                                .cleanable(true),
-                        ),
+                        Button::new("running-only")
+                            .icon(Icon::new(IconName::ListFilter))
+                            .ghost()
+                            .small()
+                            .selected(self.running_only)
+                            .tooltip(if self.running_only {
+                                "Show all containers"
+                            } else {
+                                "Show running containers only (⇧⌘R)"
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.running_only = !this.running_only;
+                                this.rebuild(cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("toggle-search")
+                            .icon(Icon::new(IconName::Search))
+                            .ghost()
+                            .small()
+                            .selected(self.search_open)
+                            .tooltip("Search (⌘F)")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.toggle_search(window, cx)
+                            })),
                     ),
             )
-            .child(self.render_header(cx))
+            .child(div().h_2().flex_shrink_0())
             .child(body)
     }
 }
