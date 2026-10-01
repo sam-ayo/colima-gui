@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- App icon for colima-gui: a volcano (Colima) that sends up containers. -->
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1E3A8A"/>
+      <stop offset="1" stop-color="#0B1433"/>
+    </linearGradient>
+    <linearGradient id="mountain" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FB923C"/>
+      <stop offset="0.45" stop-color="#EA580C"/>
+      <stop offset="1" stop-color="#7C2D12"/>
+    </linearGradient>
+    <linearGradient id="shade" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#000" stop-opacity="0"/>
+      <stop offset="1" stop-color="#000" stop-opacity="0.28"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="512" cy="560" r="230" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FDBA74" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#FDBA74" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="box" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#DBEAFE"/>
+    </linearGradient>
+    <clipPath id="tile">
+      <rect x="100" y="100" width="824" height="824" rx="185"/>
+    </clipPath>
+    <filter id="drop" x="-10%" y="-10%" width="120%" height="130%">
+      <feDropShadow dx="0" dy="12" stdDeviation="14" flood-color="#000" flood-opacity="0.3"/>
+    </filter>
+  </defs>
+
+  <g filter="url(#drop)">
+    <g clip-path="url(#tile)">
+      <rect x="100" y="100" width="824" height="824" fill="url(#sky)"/>
+      <circle cx="512" cy="560" r="230" fill="url(#glow)"/>
+
+      <!-- Volcano -->
+      <path d="M120 940 C300 820 400 660 440 572 Q512 600 584 572 C624 660 724 820 904 940 Z" fill="url(#mountain)"/>
+      <path d="M512 586 Q552 584 584 572 C624 660 724 820 904 940 L512 940 Z" fill="url(#shade)"/>
+      <path d="M440 572 Q512 600 584 572 Q512 558 440 572 Z" fill="#FED7AA"/>
+
+      <!-- Containers that rise from the crater -->
+      <g>
+        <rect x="422" y="448" width="180" height="96" rx="14" fill="url(#box)"/>
+        <g stroke="#93C5FD" stroke-width="10" stroke-linecap="round">
+          <line x1="462" y1="470" x2="462" y2="522"/>
+          <line x1="497" y1="470" x2="497" y2="522"/>
+          <line x1="532" y1="470" x2="532" y2="522"/>
+          <line x1="567" y1="470" x2="567" y2="522"/>
+        </g>
+      </g>
+      <g opacity="0.85">
+        <rect x="468" y="316" width="148" height="80" rx="12" fill="url(#box)"/>
+        <g stroke="#93C5FD" stroke-width="9" stroke-linecap="round">
+          <line x1="498" y1="335" x2="498" y2="377"/>
+          <line x1="527" y1="335" x2="527" y2="377"/>
+          <line x1="557" y1="335" x2="557" y2="377"/>
+          <line x1="586" y1="335" x2="586" y2="377"/>
+        </g>
+      </g>
+      <g opacity="0.6">
+        <rect x="424" y="214" width="118" height="64" rx="10" fill="url(#box)"/>
+        <g stroke="#93C5FD" stroke-width="8" stroke-linecap="round">
+          <line x1="452" y1="230" x2="452" y2="262"/>
+          <line x1="483" y1="230" x2="483" y2="262"/>
+          <line x1="514" y1="230" x2="514" y2="262"/>
+        </g>
+      </g>
+    </g>
+  </g>
+</svg>

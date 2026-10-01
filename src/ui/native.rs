@@ -237,6 +237,12 @@ pub fn autosave_frame(window: &Window, cx: &App) {
     platform::autosave_frame(window, "Colima Main Window", cx);
 }
 
+/// Sets the Dock icon. A bundled app gets the icon from its Info.plist, but
+/// `cargo run` starts the bare binary, which has no bundle.
+pub fn set_app_icon() {
+    platform::set_app_icon(include_bytes!("../../assets/icon/colima-gui.icns"));
+}
+
 /// Adds the standard macOS menus, and the key bindings that go with them.
 /// Also reads the saved accent color.
 pub fn init_menus(cx: &mut App) {
@@ -433,9 +439,9 @@ mod platform {
         NSAboutPanelOptionApplicationName, NSAboutPanelOptionApplicationVersion, NSAlert,
         NSAlertFirstButtonReturn, NSAppearance,
         NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication, NSColor, NSColorSpace,
-        NSEvent, NSMenu, NSMenuItem, NSView,
+        NSEvent, NSImage, NSMenu, NSMenuItem, NSView,
     };
-    use objc2_foundation::{NSDictionary, NSObject, NSString, NSUserDefaults};
+    use objc2_foundation::{NSData, NSDictionary, NSObject, NSString, NSUserDefaults};
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
     use super::*;
@@ -568,6 +574,17 @@ mod platform {
             .detach();
     }
 
+    pub(super) fn set_app_icon(icns: &[u8]) {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let data = NSData::with_bytes(icns);
+        let Some(image) = NSImage::initWithData(mtm.alloc(), &data) else {
+            return;
+        };
+        unsafe { NSApplication::sharedApplication(mtm).setApplicationIconImage(Some(&image)) };
+    }
+
     pub(super) fn show_about_panel(name: &str, version: &str) {
         let Some(mtm) = MainThreadMarker::new() else {
             return;
@@ -664,6 +681,7 @@ mod platform {
         None
     }
     pub(super) fn autosave_frame(_: &Window, _: &'static str, _: &App) {}
+    pub(super) fn set_app_icon(_: &[u8]) {}
     pub(super) fn show_about_panel(_: &str, _: &str) {}
     pub(super) fn pop_up_menu(_: &[MenuEntry]) -> Option<usize> {
         None

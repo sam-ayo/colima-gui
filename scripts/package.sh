@@ -96,6 +96,7 @@ tools="$app/Contents/Resources/tools"
 mkdir -p "$app/Contents/MacOS" "$tools/bin"
 
 cp "$target/$rust_target/release/colima-gui" "$app/Contents/MacOS/colima-gui"
+cp "$root/assets/icon/colima-gui.icns" "$app/Contents/Resources/colima-gui.icns"
 
 # Lima finds its guest agents in ../share/lima, next to bin/limactl. Keep the
 # layout of the archive. Leave out the guest agent for macOS guests, because
@@ -117,6 +118,8 @@ cat > "$app/Contents/Info.plist" <<EOF
     <key>CFBundleDisplayName</key>
     <string>$APP_NAME</string>
     <key>CFBundleExecutable</key>
+    <string>colima-gui</string>
+    <key>CFBundleIconFile</key>
     <string>colima-gui</string>
     <key>CFBundleIdentifier</key>
     <string>$BUNDLE_ID</string>

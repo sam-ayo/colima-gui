@@ -31,6 +31,7 @@ fn main() {
             ui::sync_reduce_motion(cx);
             ui::app_view::bind_keys(cx);
             ui::container_list::bind_keys(cx);
+            ui::native::set_app_icon();
             ui::native::init_menus(cx);
             updater::init(cx);
             cx.on_window_closed(|cx, _| cx.quit()).detach();
