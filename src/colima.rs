@@ -28,7 +28,7 @@ fn colima() -> Command {
 }
 
 /// The `bin` folder of the tools in the app bundle
-/// (`Colima.app/Contents/Resources/tools/bin`). `scripts/package.sh` puts
+/// (`Colima GUI.app/Contents/Resources/tools/bin`). `scripts/package.sh` puts
 /// the tools there. A `cargo run` build has no bundle.
 fn bundled_tools() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;

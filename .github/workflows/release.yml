@@ -192,5 +192,5 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" release-files/* \
             --repo sam-ayo/colima-gui-releases \
-            --title "Colima $GITHUB_REF_NAME" \
+            --title "Colima GUI $GITHUB_REF_NAME" \
             --notes-file "$RUNNER_TEMP/notes.txt"

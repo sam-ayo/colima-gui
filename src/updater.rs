@@ -39,7 +39,7 @@ const MANIFEST_URL_VAR: &str = "COLIMA_GUI_UPDATE_URL";
 const PUBLIC_KEY: &str = "05Kb7PWs2zma3JsGydJxl8wMoC+wWZdQL5JUUzsCZoc=";
 
 /// The installer package always puts the app here.
-const APP_PATH: &str = "/Applications/Colima.app";
+const APP_PATH: &str = "/Applications/Colima GUI.app";
 
 /// The first check waits a short time, so that it does not slow the start.
 const FIRST_CHECK: Duration = Duration::from_secs(10);
@@ -209,7 +209,7 @@ async fn download(package: Package, version: String) -> Result<PathBuf> {
     // signature and the version can contain any text.
     let dir = std::env::temp_dir().join("colima-gui-update");
     tokio::fs::create_dir_all(&dir).await?;
-    let path = dir.join("Colima.pkg");
+    let path = dir.join("colima-gui.pkg");
     tokio::fs::write(&path, &bytes).await?;
     Ok(path)
 }
@@ -239,7 +239,7 @@ fn install(package: &Path) -> Result<bool> {
     let script = [
         "on run argv",
         "do shell script \"/usr/sbin/installer -pkg \" & quoted form of (item 1 of argv) & \
-         \" -target /\" with prompt \"Colima wants to install an update.\" \
+         \" -target /\" with prompt \"Colima GUI wants to install an update.\" \
          with administrator privileges",
         "end run",
     ];
@@ -266,7 +266,7 @@ fn relaunch() -> Result<()> {
     Command::new("/bin/sh")
         .arg("-c")
         .arg(format!(
-            "while /bin/kill -0 {pid} 2>/dev/null; do sleep 0.2; done; /usr/bin/open {APP_PATH}"
+            "while /bin/kill -0 {pid} 2>/dev/null; do sleep 0.2; done; /usr/bin/open '{APP_PATH}'"
         ))
         .spawn()
         .context("could not relaunch the app")?;

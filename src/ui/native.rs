@@ -29,7 +29,7 @@ actions!(
 /// The name that the menus, the About panel, and the window show. The bold
 /// app menu shows the name of the executable, because the app has no
 /// bundle.
-pub const APP_NAME: &str = "Colima";
+pub const APP_NAME: &str = "Colima GUI";
 
 /// The accent colors that the View menu gives. `System` follows the accent
 /// color in System Settings. The app keeps the choice between launches.

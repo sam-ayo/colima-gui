@@ -1,5 +1,5 @@
 #!/bin/bash
-# Builds "Colima.app" and an installer package (.pkg) for macOS.
+# Builds "Colima GUI.app" and an installer package (.pkg) for macOS.
 #
 # The app contains the Colima, Lima, and Docker command line tools. The
 # installer puts the app in /Applications. It then links the tools into
@@ -8,7 +8,7 @@
 # Usage: scripts/package.sh [arm64 | x86_64]
 # The default architecture is the architecture of this Mac. For the other
 # architecture, first run `rustup target add <rust target>`.
-# Output: target/package/<arch>/Colima.app and
+# Output: "target/package/<arch>/Colima GUI.app" and
 #         target/package/<arch>/colima-gui-<version>-<arch>.pkg
 # Needs: cargo, curl, and the Xcode command line tools (pkgbuild).
 #
@@ -29,7 +29,7 @@ COLIMA_VERSION=0.10.3
 LIMA_VERSION=2.2.0
 DOCKER_VERSION=29.8.1
 
-APP_NAME=Colima
+APP_NAME="Colima GUI"
 BUNDLE_ID=colima-gui
 
 arch="${1:-$(uname -m)}"
@@ -174,11 +174,19 @@ cat > "$scripts/postinstall" <<'EOF'
 #!/bin/bash
 # Links the tools in the app into /usr/local/bin. A tool that is already
 # installed (for example from Homebrew) stays as it is.
-tools="/Applications/Colima.app/Contents/Resources/tools/bin"
+tools="/Applications/Colima GUI.app/Contents/Resources/tools/bin"
+# Versions 0.1.5 and earlier used the name "Colima.app". Remove that app, and
+# move its links to the new app.
+old="/Applications/Colima.app"
+old_tools="$old/Contents/Resources/tools/bin"
+if [ "$(defaults read "$old/Contents/Info" CFBundleIdentifier 2>/dev/null)" = colima-gui ]; then
+    rm -rf "$old"
+fi
 mkdir -p /usr/local/bin
 for tool in colima limactl lima docker; do
     link="/usr/local/bin/$tool"
-    if [ -L "$link" ] && [[ "$(readlink "$link")" == "$tools/"* ]]; then
+    target="$(readlink "$link" 2>/dev/null || true)"
+    if [ -L "$link" ] && { [[ "$target" == "$tools/"* ]] || [[ "$target" == "$old_tools/"* ]]; }; then
         ln -sf "$tools/$tool" "$link"
     elif [ ! -e "$link" ] && [ ! -e "/opt/homebrew/bin/$tool" ]; then
         ln -s "$tools/$tool" "$link"
@@ -188,7 +196,7 @@ exit 0
 EOF
 chmod 755 "$scripts/postinstall"
 
-# The app bundle must stay at /Applications/Colima.app, because the links
+# The app bundle must stay at "/Applications/Colima GUI.app", because the links
 # point there. Do not let the installer move it to a copy in another place.
 component_plist="$cache/component-$arch.plist"
 pkgbuild --analyze --root "$pkgroot" "$component_plist" >/dev/null
