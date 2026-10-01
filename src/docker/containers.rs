@@ -67,6 +67,10 @@ pub struct ContainerRow {
     pub compose_file: Option<String>,
     pub icon: Option<String>,
     pub created: i64,
+    /// The time when the container exited, in milliseconds since the Unix
+    /// epoch. The list does not include it, so only exited Compose members
+    /// get it, from the inspect data.
+    pub finished_at: Option<i64>,
 }
 
 impl ContainerRow {
@@ -76,13 +80,42 @@ impl ContainerRow {
 
     /// True for a dead container, or one that exited with an error code.
     /// Docker writes the code in the status, for example "Exited (1) 4
-    /// minutes ago".
+    /// minutes ago". A stop signal is not an error: `docker stop` sends
+    /// SIGTERM (143), then SIGKILL (137) after the timeout.
     pub fn failed(&self) -> bool {
         match self.state {
             State::Dead => true,
-            State::Exited => exit_code(&self.status).is_some_and(|c| c != 0),
+            State::Exited => {
+                exit_code(&self.status).is_some_and(|c| c != 0 && !is_stop_signal(c))
+            }
             _ => false,
         }
+    }
+
+    /// True if `failed` is true and the Compose project did not stop at the
+    /// same time. A stop sends a signal to all the members, but some
+    /// programs exit with an error code on the signal. Thus an error exit
+    /// is a stop if a different member stopped cleanly near the same time.
+    /// `rows` can contain containers of other projects.
+    pub fn failed_in<'a>(&self, rows: impl IntoIterator<Item = &'a ContainerRow>) -> bool {
+        if !self.failed() {
+            return false;
+        }
+        let (Some(project), Some(at)) = (&self.compose_project, self.finished_at) else {
+            return true;
+        };
+        !rows.into_iter().any(|r| {
+            r.id != self.id
+                && r.compose_project.as_ref() == Some(project)
+                && r.state == State::Exited
+                && !r.failed()
+                && r.finished_at.is_some_and(|t| (t - at).abs() <= STOP_WINDOW_MS)
+        })
+    }
+
+    /// True for a row that needs `finished_at` for `failed_in`.
+    fn needs_finish_time(&self) -> bool {
+        self.state == State::Exited && self.compose_project.is_some()
     }
 
     /// The status in two parts: the state and the time. "Up 2 hours" gives
@@ -147,6 +180,17 @@ fn exit_code(status: &str) -> Option<i64> {
     rest[..rest.find(')')?].parse().ok()
 }
 
+/// The longest time between the exits of two members in one stop. A member
+/// that does not stop on SIGTERM gets SIGKILL after the stop timeout, which
+/// is 10 seconds by default.
+const STOP_WINDOW_MS: i64 = 15_000;
+
+/// True for the codes of a process that a stop signal ended: 128 + SIGINT
+/// (130), SIGKILL (137), or SIGTERM (143).
+fn is_stop_signal(code: i64) -> bool {
+    matches!(code, 130 | 137 | 143)
+}
+
 /// A container port that Docker publishes on the host.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Port {
@@ -191,6 +235,7 @@ impl From<ContainerSummary> for ContainerRow {
                 .filter(|f| !f.is_empty()),
             icon: labels.get(ICON_LABEL).cloned(),
             created: c.created.unwrap_or_default(),
+            finished_at: None,
         }
     }
 }
@@ -220,7 +265,9 @@ pub async fn list_all(docker: &Docker) -> Result<Vec<ContainerRow>> {
         ..Default::default()
     };
     let list = docker.list_containers(Some(opts)).await?;
-    Ok(list.into_iter().map(ContainerRow::from).collect())
+    let mut rows: Vec<ContainerRow> = list.into_iter().map(ContainerRow::from).collect();
+    add_finish_times(docker, &mut rows).await;
+    Ok(rows)
 }
 
 /// Reads one container. Returns `None` if the container does not exist.
@@ -231,10 +278,35 @@ pub async fn refresh_one(docker: &Docker, id: &str) -> Result<Option<ContainerRo
         ..Default::default()
     };
     let list = docker.list_containers(Some(opts)).await?;
-    Ok(list
+    let mut row = list
         .into_iter()
         .map(ContainerRow::from)
-        .find(|row| row.id == id))
+        .find(|row| row.id == id);
+    add_finish_times(docker, row.as_mut_slice()).await;
+    Ok(row)
+}
+
+/// Sets `finished_at` from the inspect data, for the rows that need it. An
+/// inspect that fails leaves the value `None`, so the row can show as
+/// failed, but the list still loads.
+async fn add_finish_times(docker: &Docker, rows: &mut [ContainerRow]) {
+    let rows: Vec<&mut ContainerRow> = rows.iter_mut().filter(|r| r.needs_finish_time()).collect();
+    let times = futures::future::join_all(rows.iter().map(|r| async {
+        let info = docker.inspect_container(&r.id, None).await.ok()?;
+        parse_time(info.state?.finished_at.as_deref()?)
+    }))
+    .await;
+    for (row, time) in rows.into_iter().zip(times) {
+        row.finished_at = time;
+    }
+}
+
+/// Reads a Docker time such as "2026-10-01T01:52:47.948022754Z" as
+/// milliseconds since the Unix epoch.
+fn parse_time(s: &str) -> Option<i64> {
+    let t = chrono::DateTime::parse_from_rfc3339(s).ok()?.timestamp_millis();
+    // Docker writes "0001-01-01T00:00:00Z" for a container that did not exit.
+    (t > 0).then_some(t)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -366,12 +438,17 @@ mod tests {
             compose_file: None,
             icon: None,
             created: 0,
+            finished_at: None,
         };
         assert_eq!(row.status_parts(), ("Running".into(), Some("2 hours".into())));
         row.state = State::Exited;
         row.status = "Exited (1) 4 minutes ago".into();
         assert_eq!(row.status_parts(), ("Exited (1)".into(), Some("4 minutes ago".into())));
         assert!(row.failed());
+        row.status = "Exited (137) 6 minutes ago".into();
+        assert!(!row.failed());
+        row.status = "Exited (143) 6 minutes ago".into();
+        assert!(!row.failed());
         row.state = State::Created;
         row.status = "Created".into();
         assert_eq!(row.status_parts(), ("Created".into(), None));
@@ -390,6 +467,47 @@ mod tests {
         assert_eq!(ago("3 days ago"), Some(259_200));
         assert_eq!(ago("2 weeks ago"), Some(1_209_600));
         assert_eq!(ago("soon"), None);
+    }
+
+    #[test]
+    fn an_error_exit_in_a_project_stop_is_not_a_failure() {
+        let member = |id: &str, status: &str, at: i64| ContainerRow {
+            id: id.into(),
+            name: id.into(),
+            image: String::new(),
+            state: State::Exited,
+            status: status.into(),
+            ports: Vec::new(),
+            compose_project: Some("api".into()),
+            compose_service: Some(id.into()),
+            compose_file: None,
+            icon: None,
+            created: 0,
+            finished_at: Some(at),
+        };
+        let mongo = member("mongo", "Exited (2) 6 minutes ago", 47_948);
+        let redis = member("redis", "Exited (0) 6 minutes ago", 48_009);
+        let server = member("server", "Exited (137) 6 minutes ago", 57_970);
+        assert!(!mongo.failed_in([&mongo, &redis, &server]));
+        assert!(!mongo.failed_in([&mongo, &server]));
+        // A crash alone, or long before the stop of the others.
+        assert!(mongo.failed_in([&mongo]));
+        let late = member("late", "Exited (0) 1 hour ago", 47_948 + 3_600_000);
+        assert!(mongo.failed_in([&mongo, &late]));
+        // A member that also failed does not make the exit a stop.
+        let worker = member("worker", "Exited (1) 6 minutes ago", 48_000);
+        assert!(mongo.failed_in([&mongo, &worker]));
+        // A member of a different project does not count.
+        let other = ContainerRow { compose_project: Some("shop".into()), ..redis.clone() };
+        assert!(mongo.failed_in([&mongo, &other]));
+    }
+
+    #[test]
+    fn docker_times_read_as_milliseconds() {
+        assert_eq!(parse_time("1970-01-01T00:00:01.5Z"), Some(1_500));
+        assert_eq!(parse_time("2026-10-01T01:52:47.948022754Z"), Some(1_790_819_567_948));
+        assert_eq!(parse_time("0001-01-01T00:00:00Z"), None);
+        assert_eq!(parse_time("soon"), None);
     }
 
     #[test]

@@ -128,7 +128,8 @@ pub enum ListItem {
         project: String,
         total: usize,
         running: usize,
-        /// The members that are dead or exited with an error code.
+        /// The members that are dead or exited with an error code, when the
+        /// project did not stop at the same time.
         failed: usize,
         collapsed: bool,
     },
@@ -156,9 +157,12 @@ pub fn build_list<'a>(
                 .as_deref()
                 .is_some_and(|p| p.to_lowercase().contains(&filter))
     };
+    // A failure check reads all the members of a project, also the members
+    // that the filter hides.
+    let rows: Vec<&ContainerRow> = rows.collect();
     let mut groups: BTreeMap<&str, Vec<&ContainerRow>> = BTreeMap::new();
     let mut single: Vec<&ContainerRow> = Vec::new();
-    for r in rows.filter(|r| matches(r)) {
+    for &r in rows.iter().filter(|r| matches(r)) {
         match r.compose_project.as_deref() {
             Some(p) => groups.entry(p).or_default().push(r),
             None => single.push(r),
@@ -172,7 +176,7 @@ pub fn build_list<'a>(
             project: project.to_string(),
             total: members.len(),
             running: members.iter().filter(|r| r.state.is_running()).count(),
-            failed: members.iter().filter(|r| r.failed()).count(),
+            failed: members.iter().filter(|r| r.failed_in(rows.iter().copied())).count(),
             collapsed: is_collapsed,
         });
         if !is_collapsed {
@@ -634,6 +638,7 @@ mod tests {
             compose_file: None,
             icon: None,
             created: 0,
+            finished_at: None,
         }
     }
 

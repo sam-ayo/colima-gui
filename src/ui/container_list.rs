@@ -846,7 +846,7 @@ impl ContainerList {
         } else {
             row.name.clone()
         };
-        let failed = row.failed();
+        let failed = row.failed_in(store.set.rows.values());
         // A failed container shows why and when. The others show the image.
         let status = match row.status_parts() {
             _ if running => row.status.clone(),
