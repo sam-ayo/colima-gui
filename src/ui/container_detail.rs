@@ -61,6 +61,8 @@ impl DetailTab {
 pub enum DetailEvent {
     Close,
     Error(String),
+    /// Show a volume in the volume list.
+    RevealVolume(String),
 }
 
 struct Loaded {
@@ -237,87 +239,19 @@ impl ContainerDetail {
         .detach();
     }
 
-    /// A segmented control in the style of AppKit. The selected segment has
-    /// a raised fill, a border, and a shadow, so it is clear in the two themes.
-    ///
-    /// The selected fill moves to the segment that the user clicks. The fill
-    /// clips a copy of the labels in the selected style, so the label colors
-    /// change at the edge of the fill, not with a separate fade.
     fn render_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let t = cx.theme();
-        let dark = t.is_dark();
-        let track = if dark { white().opacity(0.06) } else { black().opacity(0.06) };
-        let selected_bg = if dark { white().opacity(0.22) } else { white() };
-        let selected_border = if dark { white().opacity(0.12) } else { black().opacity(0.1) };
-        let hover_bg = native::control_hover(cx);
-        let fg = t.foreground;
-        let muted = t.muted_foreground;
-        let radius = t.radius;
-        let selected_ix = DetailTab::ALL.iter().position(|&tab| tab == self.tab).unwrap_or(0);
-
-        let segment = move |label: &'static str| {
-            div()
-                .w(px(TAB_WIDTH))
-                .h(px(22.))
-                .flex_shrink_0()
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(radius)
-                .text_size(px(text::BODY))
-                .child(label)
-        };
-
-        // A spring retargets from its current position, so a quick second
-        // click moves the fill on from where it is.
-        let indicator = div()
-            .absolute()
-            .top(px(TAB_GAP))
-            .w(px(TAB_WIDTH))
-            .h(px(22.))
-            .rounded(radius)
-            .border_1()
-            .border_color(selected_border)
-            .bg(selected_bg)
-            .shadow_xs()
-            .overflow_hidden()
-            .with_spring(
-                "detail-tab-indicator",
-                SpringAnimation::new(SNAPPY_SPRING).to(selected_ix as f32),
-                move |d, ix: f32| {
-                    let left = TAB_GAP + ix * (TAB_WIDTH + TAB_GAP);
-                    d.left(px(left)).child(
-                        h_flex()
-                            .absolute()
-                            // The border is inside the fill, so move the copy
-                            // back by its width too.
-                            .top(px(-1.))
-                            .left(px(TAB_GAP - left - 1.))
-                            .gap(px(TAB_GAP))
-                            .text_color(fg)
-                            .font_weight(FontWeight::MEDIUM)
-                            .children(DetailTab::ALL.map(|tab| segment(tab.label()))),
-                    )
-                },
-            );
-
-        h_flex()
-            .id("detail-tabs")
-            .relative()
-            .p(px(TAB_GAP))
-            .gap(px(TAB_GAP))
-            .rounded(radius + px(TAB_GAP))
-            .bg(track)
-            .children(DetailTab::ALL.map(|tab| {
-                segment(tab.label())
-                    .id(tab.label())
-                    .text_color(muted)
-                    .when(tab != self.tab, |d| {
-                        d.cursor_pointer().hover(|s| s.bg(hover_bg).text_color(fg))
-                    })
-                    .on_click(cx.listener(move |this, _, window, cx| this.set_tab(tab, window, cx)))
-            }))
-            .child(indicator)
+        let labels: Vec<&'static str> = DetailTab::ALL.iter().map(|t| t.label()).collect();
+        let selected = DetailTab::ALL.iter().position(|&tab| tab == self.tab).unwrap_or(0);
+        let view = cx.weak_entity();
+        segmented_control(
+            "detail-tabs",
+            labels,
+            selected,
+            Rc::new(move |ix, window, cx| {
+                let _ = view.update(cx, |this, cx| this.set_tab(DetailTab::ALL[ix], window, cx));
+            }),
+            cx,
+        )
     }
 
     fn render_inspect(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -418,12 +352,14 @@ impl ContainerDetail {
 
         let home = std::env::var("HOME").unwrap_or_default();
         let mounts = loaded.as_ref().filter(|d| !d.mounts.is_empty()).map(|d| {
-            section("Mounts", cx).child(card(d.mounts.iter().map(|m| {
+            section("Mounts", cx).child(card(d.mounts.iter().enumerate().map(|(ix, m)| {
                 let source = match m.source.strip_prefix(&home) {
                     Some(rest) if !m.volume && !home.is_empty() => format!("~{rest}"),
                     _ => m.source.clone(),
                 };
-                list_row()
+                let volume = m.volume.then(|| m.source.clone());
+                let row = list_row()
+                    .id(("mount", ix))
                     .gap_2p5()
                     .child(
                         Icon::new(if m.volume { IconName::Database } else { IconName::Folder })
@@ -447,6 +383,20 @@ impl ContainerDetail {
                             .text_color(muted)
                             .child(m.destination.clone()),
                     )
+                    // A volume opens in the volume list.
+                    .when_some(volume, |d, name| {
+                        d.cursor_pointer()
+                            .hover(|d| d.bg(native::hover(cx)))
+                            .child(Icon::new(IconName::ChevronRight).xsmall().text_color(muted))
+                            .tooltip(|window, cx| {
+                                gpui_component::tooltip::Tooltip::new("Show in Volumes").build(window, cx)
+                            })
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.emit(DetailEvent::RevealVolume(name.clone()))
+                            }))
+                    });
+                // `card` takes plain rows.
+                div().child(row)
             }), cx))
         });
 
@@ -487,23 +437,121 @@ impl ContainerDetail {
                     })),
             );
 
-        v_flex()
+        // The content is in an inner column, so a long list scrolls and
+        // the cards do not shrink to the height of the pane.
+        div()
             .id("info")
             .size_full()
             .overflow_y_scroll()
-            .px_5()
-            .pb_5()
-            .gap_5()
-            .text_size(px(text::BODY))
-            .child(summary)
-            .children(ports)
-            .children(mounts)
-            .child(buttons)
+            .child(
+                v_flex()
+                    .px_5()
+                    .pb_5()
+                    .gap_5()
+                    .text_size(px(text::BODY))
+                    .child(summary)
+                    .children(ports)
+                    .children(mounts)
+                    .child(buttons),
+            )
             .into_any_element()
     }
 }
 
-fn loading(id: &'static str) -> AnyElement {
+/// Gets the index of the segment that the user clicks.
+pub(super) type SegmentHandler = Rc<dyn Fn(usize, &mut Window, &mut App)>;
+
+/// A segmented control in the style of AppKit. The selected segment has
+/// a raised fill, a border, and a shadow, so it is clear in the two themes.
+///
+/// The selected fill moves to the segment that the user clicks. The fill
+/// clips a copy of the labels in the selected style, so the label colors
+/// change at the edge of the fill, not with a separate fade.
+pub(super) fn segmented_control(
+    id: &'static str,
+    labels: Vec<&'static str>,
+    selected_ix: usize,
+    on_select: SegmentHandler,
+    cx: &App,
+) -> impl IntoElement + use<> {
+    let t = cx.theme();
+    let dark = t.is_dark();
+    let track = if dark { white().opacity(0.06) } else { black().opacity(0.06) };
+    let selected_bg = if dark { white().opacity(0.22) } else { white() };
+    let selected_border = if dark { white().opacity(0.12) } else { black().opacity(0.1) };
+    let hover_bg = native::control_hover(cx);
+    let fg = t.foreground;
+    let muted = t.muted_foreground;
+    let radius = t.radius;
+
+    let segment = move |label: &'static str| {
+        div()
+            .w(px(TAB_WIDTH))
+            .h(px(22.))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(radius)
+            .text_size(px(text::BODY))
+            .child(label)
+    };
+
+    let indicator_labels = labels.clone();
+    // A spring retargets from its current position, so a quick second
+    // click moves the fill on from where it is.
+    let indicator = div()
+        .absolute()
+        .top(px(TAB_GAP))
+        .w(px(TAB_WIDTH))
+        .h(px(22.))
+        .rounded(radius)
+        .border_1()
+        .border_color(selected_border)
+        .bg(selected_bg)
+        .shadow_xs()
+        .overflow_hidden()
+        .with_spring(
+            ElementId::Name(format!("{id}-indicator").into()),
+            SpringAnimation::new(SNAPPY_SPRING).to(selected_ix as f32),
+            move |d, ix: f32| {
+                let left = TAB_GAP + ix * (TAB_WIDTH + TAB_GAP);
+                d.left(px(left)).child(
+                    h_flex()
+                        .absolute()
+                        // The border is inside the fill, so move the copy
+                        // back by its width too.
+                        .top(px(-1.))
+                        .left(px(TAB_GAP - left - 1.))
+                        .gap(px(TAB_GAP))
+                        .text_color(fg)
+                        .font_weight(FontWeight::MEDIUM)
+                        .children(indicator_labels.iter().map(|&label| segment(label))),
+                )
+            },
+        );
+
+    h_flex()
+        .id(id)
+        .relative()
+        .p(px(TAB_GAP))
+        .gap(px(TAB_GAP))
+        .rounded(radius + px(TAB_GAP))
+        .bg(track)
+        .children(labels.iter().enumerate().map(|(ix, &label)| {
+            let on_select = on_select.clone();
+            segment(label)
+                .id(label)
+                .text_color(muted)
+                .when(ix != selected_ix, |d| {
+                    d.cursor_pointer().hover(|s| s.bg(hover_bg).text_color(fg))
+                })
+                .on_click(move |_, window, cx| on_select(ix, window, cx))
+        }))
+        .child(indicator)
+}
+
+pub(super) fn loading(id: &'static str) -> AnyElement {
     v_flex()
         .size_full()
         .items_center()
@@ -513,7 +561,7 @@ fn loading(id: &'static str) -> AnyElement {
 }
 
 /// A bordered box of rows with lines between them.
-fn card(rows: impl IntoIterator<Item = Div>, cx: &App) -> Div {
+pub(super) fn card(rows: impl IntoIterator<Item = Div>, cx: &App) -> Div {
     let t = cx.theme();
     v_flex()
         .rounded(px(10.))
@@ -526,12 +574,12 @@ fn card(rows: impl IntoIterator<Item = Div>, cx: &App) -> Div {
         }))
 }
 
-fn list_row() -> Div {
+pub(super) fn list_row() -> Div {
     h_flex().min_h(px(40.)).px_3p5().py_2()
 }
 
 /// A heading and its content.
-fn section(title: &'static str, cx: &App) -> Div {
+pub(super) fn section(title: &'static str, cx: &App) -> Div {
     let t = cx.theme();
     v_flex().gap_2().child(
         div()
@@ -543,7 +591,7 @@ fn section(title: &'static str, cx: &App) -> Div {
 }
 
 /// A label on the left and a value on the right.
-fn field(label: &'static str, value: impl IntoElement, cx: &App) -> Div {
+pub(super) fn field(label: &'static str, value: impl IntoElement, cx: &App) -> Div {
     let t = cx.theme();
     list_row()
         .child(

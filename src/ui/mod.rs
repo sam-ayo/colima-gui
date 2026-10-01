@@ -7,6 +7,8 @@ pub mod native;
 pub mod sidebar;
 pub mod stats_view;
 pub mod status_menu;
+pub mod volume_detail;
+pub mod volume_list;
 
 use std::sync::Arc;
 use std::time::Duration;

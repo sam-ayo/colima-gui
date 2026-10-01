@@ -1,4 +1,5 @@
-//! The root view: the sidebar, the container list, and the detail pane.
+//! The root view: the sidebar, the container or volume list, and the
+//! detail pane.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -16,10 +17,13 @@ use crate::docker::EngineStatus;
 use crate::state::container_store::{ContainerStore, StoreEvent};
 use crate::state::machine_store::{MachineEvent, MachineStore};
 use crate::state::stats_store::StatsStore;
+use crate::state::volume_store::{VolumeEvent, VolumeStore};
 use crate::ui::container_detail::{ContainerDetail, DetailEvent};
 use crate::ui::container_list::{ContainerList, ListEvent};
 use crate::ui::sidebar::{Section, Sidebar};
 use crate::ui::status_menu::{StatusMenu, StatusMenuEvent};
+use crate::ui::volume_detail::{VolumeDetail, VolumeDetailEvent};
+use crate::ui::volume_list::{VolumeList, VolumeListEvent};
 use crate::ui::{
     NATIVE_BUTTON_HEIGHT, native, native::MenuEntry, text,
     ENTER_DURATION, SIDEBAR_INSET, SIDEBAR_WIDTH, TOOLBAR_HEIGHT, delayed_reveal, drag_area, spinner,
@@ -101,10 +105,13 @@ pub struct AppView {
     stats: Entity<StatsStore>,
     machines: Entity<MachineStore>,
     list: Entity<ContainerList>,
+    volumes: Entity<VolumeStore>,
+    volume_list: Entity<VolumeList>,
     detail: Option<Entity<ContainerDetail>>,
+    volume_detail: Option<Entity<VolumeDetail>>,
     /// The detail pane that goes out after a click on its close button.
     /// It stays until the spring closes it.
-    closing_detail: Option<Entity<ContainerDetail>>,
+    closing_detail: Option<AnyView>,
     /// The part of the detail pane width that shows, from 0 to 1, and its
     /// speed. The list gets the space that the pane does not use.
     detail_spring: SpringState,
@@ -136,6 +143,7 @@ pub struct AppView {
     _status_menu: Entity<StatusMenu>,
     _subs: Vec<Subscription>,
     _detail_sub: Option<Subscription>,
+    _volume_detail_sub: Option<Subscription>,
 }
 
 impl AppView {
@@ -144,6 +152,8 @@ impl AppView {
         let stats = cx.new(|_| StatsStore::new());
         let machines = cx.new(MachineStore::new);
         let list = cx.new(|cx| ContainerList::new(store.clone(), stats.clone(), window, cx));
+        let volumes = cx.new(|cx| VolumeStore::new(store.clone(), cx));
+        let volume_list = cx.new(|cx| VolumeList::new(volumes.clone(), store.clone(), window, cx));
         let handle = window.window_handle();
         let status_menu = cx.new(|cx| StatusMenu::new(store.clone(), handle, cx));
         let subs = vec![
@@ -176,11 +186,13 @@ impl AppView {
                 StoreEvent::Error(msg) => {
                     window.push_notification(Notification::error(msg.clone()), cx)
                 }
+                StoreEvent::VolumesChanged => {}
                 StoreEvent::Changed => {
                     let status = this.store.read(cx).status.clone();
                     // Close the detail pane when the engine goes away.
                     if status != EngineStatus::Connected {
-                        this.close_detail(false, cx);
+                        this.close_pane(Section::Containers, false, cx);
+                        this.close_pane(Section::Volumes, false, cx);
                     }
                     if std::mem::discriminant(&status) != std::mem::discriminant(&this.engine_status) {
                         this.engine_status = status;
@@ -193,18 +205,43 @@ impl AppView {
                 }
             }),
             cx.subscribe_in(&status_menu, window, |this, _, ev: &StatusMenuEvent, window, cx| match ev {
-                StatusMenuEvent::Reveal(id) => {
-                    this.section = Section::Containers;
-                    this.list.update(cx, |l, cx| l.reveal(id, cx));
-                    this.list.focus_handle(cx).focus(window, cx);
-                    cx.notify();
+                StatusMenuEvent::Reveal(id) => this.reveal_container(id, window, cx),
+            }),
+            cx.subscribe_in(&volumes, window, |this, _, ev: &VolumeEvent, window, cx| match ev {
+                VolumeEvent::Created(name) => {
+                    this.volume_list.update(cx, |l, cx| l.reveal(name, cx));
+                    this.volume_list.focus_handle(cx).focus(window, cx);
+                }
+                VolumeEvent::Error(msg) => {
+                    window.push_notification(Notification::error(msg.clone()), cx)
+                }
+                VolumeEvent::Pruned(count, bytes) => {
+                    let noun = if *count == 1 { "volume" } else { "volumes" };
+                    let msg = if *count == 0 {
+                        "No volumes were unused.".to_string()
+                    } else {
+                        format!(
+                            "Removed {count} {noun}. {} is free.",
+                            crate::docker::stats::format_bytes(*bytes)
+                        )
+                    };
+                    window.push_notification(Notification::success(msg), cx)
+                }
+            }),
+            cx.subscribe_in(&volume_list, window, |this, _, ev: &VolumeListEvent, window, cx| match ev {
+                VolumeListEvent::RevealContainer(id) => this.reveal_container(id, window, cx),
+                VolumeListEvent::Selected { name: Some(name), pointer } => {
+                    this.open_volume_detail(name.clone(), *pointer, window, cx)
+                }
+                VolumeListEvent::Selected { name: None, pointer } => {
+                    this.close_pane(Section::Volumes, *pointer, cx)
                 }
             }),
             cx.subscribe_in(&list, window, |this, _, ev: &ListEvent, window, cx| match ev {
                 ListEvent::Selected { id: Some(id), pointer } => {
                     this.open_detail(id.clone(), *pointer, window, cx)
                 }
-                ListEvent::Selected { id: None, pointer } => this.close_detail(*pointer, cx),
+                ListEvent::Selected { id: None, pointer } => this.close_pane(Section::Containers, *pointer, cx),
             }),
         ];
         list.focus_handle(cx).focus(window, cx);
@@ -213,7 +250,10 @@ impl AppView {
             stats,
             machines,
             list,
+            volumes,
+            volume_list,
             detail: None,
+            volume_detail: None,
             closing_detail: None,
             detail_spring: SpringState { position: 0., velocity: 0. },
             detail_stepped_at: None,
@@ -232,13 +272,51 @@ impl AppView {
             _status_menu: status_menu,
             _subs: subs,
             _detail_sub: None,
+            _volume_detail_sub: None,
         }
+    }
+
+    /// Shows a section, and moves the focus to its list.
+    fn set_section(&mut self, section: Section, window: &mut Window, cx: &mut Context<Self>) {
+        self.section = section;
+        match section {
+            Section::Containers => self.list.focus_handle(cx).focus(window, cx),
+            Section::Volumes => {
+                self.volumes.update(cx, |v, cx| v.activate(cx));
+                self.volume_list.focus_handle(cx).focus(window, cx);
+            }
+            _ => {}
+        }
+        if section != Section::Volumes {
+            self.volumes.update(cx, |v, _| v.deactivate());
+        }
+        // Each section keeps its own pane. The pane of the new section shows
+        // at once, with no spring, as the list does.
+        self.closing_detail = None;
+        let position = if self.pane().is_some() { 1. } else { 0. };
+        self.detail_spring = SpringState { position, velocity: 0. };
+        self.detail_stepped_at = None;
+        cx.notify();
+    }
+
+    /// The detail pane of the current section.
+    fn pane(&self) -> Option<AnyView> {
+        match self.section {
+            Section::Containers => self.detail.clone().map(Into::into),
+            Section::Volumes => self.volume_detail.clone().map(Into::into),
+            _ => None,
+        }
+    }
+
+    /// Shows a container in the container list, and selects it.
+    fn reveal_container(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_section(Section::Containers, window, cx);
+        self.list.update(cx, |l, cx| l.reveal(id, cx));
     }
 
     /// True when the main area shows the detail pane.
     fn detail_shown(&self, cx: &App) -> bool {
-        self.detail.is_some()
-            && self.section.is_available()
+        self.pane().is_some()
             && self.store.read(cx).status == EngineStatus::Connected
     }
 
@@ -327,6 +405,9 @@ impl AppView {
         if self.list.read(cx).leading_inset() != inset {
             self.list.update(cx, |l, cx| l.set_leading_inset(inset, cx));
         }
+        if self.volume_list.read(cx).leading_inset() != inset {
+            self.volume_list.update(cx, |l, cx| l.set_leading_inset(inset, cx));
+        }
         width
     }
 
@@ -334,7 +415,7 @@ impl AppView {
     /// the part of the pane width that shows in this frame. At the end of
     /// a close, the pane that goes out is dropped.
     fn step_detail(&mut self, window: &mut Window, cx: &App) -> f32 {
-        let target = if self.detail.is_some() { 1. } else { 0. };
+        let target = if self.pane().is_some() { 1. } else { 0. };
         let now = Instant::now();
         let spring = &mut self.detail_spring;
         if cx.reduce_motion() {
@@ -587,24 +668,71 @@ impl AppView {
                 DetailEvent::Error(msg) => {
                     window.push_notification(Notification::error(msg.clone()), cx)
                 }
+                DetailEvent::RevealVolume(name) => {
+                    this.set_section(Section::Volumes, window, cx);
+                    this.volume_list.update(cx, |l, cx| l.reveal(name, cx));
+                }
             }
         }));
         self.detail = Some(detail);
         cx.notify();
     }
 
-    /// Closes the detail pane. A close by the pointer lets the pane go out
-    /// to the right edge, the same path as its entrance. A key closes it
-    /// immediately.
-    fn close_detail(&mut self, pointer: bool, cx: &mut Context<Self>) {
-        let Some(detail) = self.detail.take() else { return };
-        self._detail_sub = None;
+    /// Closes the detail pane of a section. A close by the pointer lets the
+    /// pane go out to the right edge, the same path as its entrance. A key
+    /// closes it immediately.
+    fn close_pane(&mut self, section: Section, pointer: bool, cx: &mut Context<Self>) {
+        let pane: AnyView = match section {
+            Section::Containers => match self.detail.take() {
+                Some(d) => {
+                    self._detail_sub = None;
+                    d.into()
+                }
+                None => return,
+            },
+            Section::Volumes => match self.volume_detail.take() {
+                Some(d) => {
+                    self._volume_detail_sub = None;
+                    d.into()
+                }
+                None => return,
+            },
+            _ => return,
+        };
+        // The pane of a hidden section goes away with no exit.
+        if section != self.section {
+            return;
+        }
         if pointer && !cx.reduce_motion() {
-            self.closing_detail = Some(detail);
+            self.closing_detail = Some(pane);
         } else {
             self.closing_detail = None;
             self.detail_spring = SpringState { position: 0., velocity: 0. };
         }
+        cx.notify();
+    }
+
+    fn open_volume_detail(&mut self, name: String, pointer: bool, window: &mut Window, cx: &mut Context<Self>) {
+        // The pane moves as the container pane does. See `open_detail`.
+        self.closing_detail = None;
+        if !pointer {
+            self.detail_spring = SpringState { position: 1., velocity: 0. };
+        }
+        let tab = self.volume_detail.as_ref().map(|d| d.read(cx).tab()).unwrap_or_default();
+        let (volumes, store) = (self.volumes.clone(), self.store.clone());
+        let detail = cx.new(|cx| VolumeDetail::new(name, volumes, store, tab, cx));
+        self._volume_detail_sub = Some(cx.subscribe_in(
+            &detail,
+            window,
+            |this, _, ev: &VolumeDetailEvent, window, cx| match ev {
+                VolumeDetailEvent::Close => this.volume_list.update(cx, |l, cx| l.clear_selection(cx)),
+                VolumeDetailEvent::RevealContainer(id) => this.reveal_container(id, window, cx),
+                VolumeDetailEvent::Remove(name) => {
+                    this.volume_list.update(cx, |l, cx| l.request_remove(name.clone(), window, cx))
+                }
+            },
+        ));
+        self.volume_detail = Some(detail);
         cx.notify();
     }
 
@@ -726,11 +854,8 @@ impl Render for AppView {
         let machines = self.machines.read(cx);
         let open_view = view.clone();
         let menu_view = view.clone();
-        let sidebar = Sidebar::new(self.section, sidebar_width, move |section, _, cx| {
-            let _ = view.update(cx, |this, cx| {
-                this.section = section;
-                cx.notify();
-            });
+        let sidebar = Sidebar::new(self.section, sidebar_width, move |section, window, cx| {
+            let _ = view.update(cx, |this, cx| this.set_section(section, window, cx));
         })
         .machines(
             machines.machines.clone(),
@@ -754,6 +879,13 @@ impl Render for AppView {
         } else if let Some(state) = self.render_engine_state(cx) {
             with_drag_area(state)
         } else {
+            let list: AnyView = if self.section == Section::Volumes {
+                self.volume_list.clone().into()
+            } else {
+                self.list.clone().into()
+            };
+            let pane = self.pane();
+            let open = pane.is_some();
             div()
                 .flex()
                 .flex_1()
@@ -767,10 +899,9 @@ impl Render for AppView {
                         .flex_1()
                         .min_w_0()
                         .h_full()
-                        .child(self.list.clone().cached(StyleRefinement::default().size_full())),
+                        .child(list.cached(StyleRefinement::default().size_full())),
                 )
-                .when_some(self.detail.clone().or_else(|| self.closing_detail.clone()), |d, detail| {
-                    let open = self.detail.is_some();
+                .when_some(pane.or_else(|| self.closing_detail.clone()), |d, detail| {
                     // The pane sits at the left edge of its area, and the
                     // area cuts off the rest. The pane thus comes in from
                     // the right edge, where it lives, and the edge of the

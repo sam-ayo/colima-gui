@@ -53,9 +53,9 @@ impl Section {
         }
     }
 
-    /// Only the containers section exists in the first version.
+    /// The sections that exist now. The others show a placeholder.
     pub fn is_available(self) -> bool {
-        self == Section::Containers
+        matches!(self, Section::Containers | Section::Volumes)
     }
 }
 

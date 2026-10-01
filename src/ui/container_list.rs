@@ -37,30 +37,33 @@ actions!(
 );
 
 const CONTEXT: &str = "ContainerList";
-const ROW_HEIGHT: f32 = 54.;
+pub(super) const ROW_HEIGHT: f32 = 54.;
 const NAME_MIN_WIDTH: f32 = 170.;
-const ICON_SIZE: f32 = 32.;
+pub(super) const ICON_SIZE: f32 = 32.;
 /// The left space of a row. The chevron of a group sits in it, so the
 /// icons of all rows align.
-const GUTTER: f32 = 34.;
+pub(super) const GUTTER: f32 = 34.;
 /// The x position of the tree line, in the row: the center of the group
 /// tile.
-const TREE_X: f32 = ROW_INSET + GUTTER + ICON_SIZE / 2.;
+pub(super) const TREE_X: f32 = ROW_INSET + GUTTER + ICON_SIZE / 2.;
 /// The left edge of a service row. It starts right of the tree line, so a
 /// selected row does not cover the line.
-const CHILD_INSET: f32 = TREE_X + 6.;
+pub(super) const CHILD_INSET: f32 = TREE_X + 6.;
 const PORTS_WIDTH: f32 = 150.;
 const ACTIONS_WIDTH: f32 = 80.;
 /// The maximum number of group members that get a stats stream.
 const GROUP_STATS_LIMIT: usize = 30;
 /// The space between the list edge and the rounded row background.
-const ROW_INSET: f32 = 8.;
+pub(super) const ROW_INSET: f32 = 8.;
+/// The space between the right list edge and the row background. The
+/// scrollbar overlays the rows, so this inset is the scrollbar width.
+pub(super) const ROW_TRAILING_INSET: f32 = 16.;
 /// The list width that a service row with all its columns needs: the
 /// indent, the icon, the name, the ports, the actions, the three gaps, the
 /// right padding, and the right inset. A narrower list hides the ports, and
 /// the names truncate. The actions always show.
 const WIDE_LIST_WIDTH: f32 = CHILD_INSET + 12. + ICON_SIZE + NAME_MIN_WIDTH + PORTS_WIDTH
-    + ACTIONS_WIDTH + 3. * 12. + 8. + ROW_INSET;
+    + ACTIONS_WIDTH + 3. * 12. + 8. + ROW_TRAILING_INSET;
 const ROW_GROUP: &str = "container-row";
 const HEADER_GROUP: &str = "container-group";
 
@@ -85,7 +88,7 @@ pub enum ListEvent {
 
 /// How a row comes into the list.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Entrance {
+pub(crate) enum Entrance {
     /// The row is new in Docker. It fades in.
     New,
     /// The group of the row expanded. The row fades in and moves down a
@@ -452,59 +455,15 @@ impl ContainerList {
             _ => None,
         };
         let t = cx.theme();
-        let line = t.muted_foreground.opacity(0.35);
-        let mid = ROW_HEIGHT / 2.;
         div()
             .relative()
             .w_full()
             .h(px(ROW_HEIGHT))
-            .px(px(ROW_INSET))
+            .pl(px(ROW_INSET))
+            .pr(px(ROW_TRAILING_INSET))
             .py_px()
-            .when(divider, |d| {
-                d.pt(px(4.)).child(
-                    div()
-                        .absolute()
-                        .top_0()
-                        .left(px(ROW_INSET + 10.))
-                        .right(px(ROW_INSET + 10.))
-                        .h_px()
-                        .bg(t.border),
-                )
-            })
-            .when_some(tree, |d, tree| {
-                // The line from the bottom of the group tile to the next row.
-                let stem = div()
-                    .absolute()
-                    .left(px(TREE_X))
-                    .top(px((ROW_HEIGHT + ICON_SIZE) / 2.))
-                    .bottom_0()
-                    .w_px()
-                    .bg(line);
-                // A rounded elbow into the icon of the service.
-                let elbow = div()
-                    .absolute()
-                    .left(px(TREE_X))
-                    .top_0()
-                    .w(px(CHILD_INSET + 6. - TREE_X))
-                    .h(px(mid))
-                    .border_l_1()
-                    .border_b_1()
-                    .rounded_bl(px(6.))
-                    .border_color(line);
-                // The line that continues to the services below.
-                let rest = div()
-                    .absolute()
-                    .left(px(TREE_X))
-                    .top(px(mid))
-                    .bottom_0()
-                    .w_px()
-                    .bg(line);
-                match tree {
-                    Tree::Stem => d.child(stem),
-                    Tree::Branch => d.child(elbow).child(rest),
-                    Tree::Last => d.child(elbow),
-                }
-            })
+            .when(divider, |d| d.pt(px(4.)).child(divider_line(cx)))
+            .when_some(tree, |d, tree| d.children(tree_lines(tree, t.muted_foreground.opacity(0.35))))
             .child(item)
             .map(|d| {
                 let entering = match &self.items[ix] {
@@ -974,7 +933,7 @@ impl ContainerList {
 }
 
 /// The color of the Docker logo.
-const DOCKER_BLUE: Hsla = Hsla {
+pub(super) const DOCKER_BLUE: Hsla = Hsla {
     h: 206. / 360.,
     s: 0.93,
     l: 0.52,
@@ -982,13 +941,59 @@ const DOCKER_BLUE: Hsla = Hsla {
 };
 
 #[derive(Clone, Copy)]
-enum Tree {
+pub(super) enum Tree {
     /// A group that has services below it.
     Stem,
     /// A service that has more services below it.
     Branch,
     /// The last service of a group.
     Last,
+}
+
+/// The line that separates the groups from the single rows.
+pub(super) fn divider_line(cx: &App) -> Div {
+    div()
+        .absolute()
+        .top_0()
+        .left(px(ROW_INSET + 10.))
+        .right(px(ROW_TRAILING_INSET + 10.))
+        .h_px()
+        .bg(cx.theme().border)
+}
+
+/// The tree lines that join the rows of a group to the group row.
+pub(super) fn tree_lines(tree: Tree, line: Hsla) -> Vec<Div> {
+    let mid = ROW_HEIGHT / 2.;
+    // The line from the bottom of the group tile to the next row.
+    let stem = || {
+        div()
+            .absolute()
+            .left(px(TREE_X))
+            .top(px((ROW_HEIGHT + ICON_SIZE) / 2.))
+            .bottom_0()
+            .w_px()
+            .bg(line)
+    };
+    // A rounded elbow into the icon of the row.
+    let elbow = || {
+        div()
+            .absolute()
+            .left(px(TREE_X))
+            .top_0()
+            .w(px(CHILD_INSET + 6. - TREE_X))
+            .h(px(mid))
+            .border_l_1()
+            .border_b_1()
+            .rounded_bl(px(6.))
+            .border_color(line)
+    };
+    // The line that continues to the rows below.
+    let rest = || div().absolute().left(px(TREE_X)).top(px(mid)).bottom_0().w_px().bg(line);
+    match tree {
+        Tree::Stem => vec![stem()],
+        Tree::Branch => vec![elbow(), rest()],
+        Tree::Last => vec![elbow()],
+    }
 }
 
 /// The name of the main Compose file. A click shows the file in Finder.

@@ -414,6 +414,39 @@ pub fn show_alert(message: &str, info: &str, buttons: &[&str]) -> Option<usize> 
     platform::show_alert(message, info, buttons)
 }
 
+/// Asks for a line of text in an alert with a text field. The first button
+/// is `ok`, and Return chooses it. `on_done` gets the text, but not if the
+/// user cancels.
+///
+/// As with `show_context_menu`, the alert opens from a task after the next
+/// frame, because it runs its own event loop.
+pub fn ask_text<T: 'static>(
+    request: TextRequest,
+    window: &mut Window,
+    cx: &mut Context<T>,
+    on_done: impl FnOnce(&mut T, String, &mut Window, &mut Context<T>) + 'static,
+) {
+    let this = cx.weak_entity();
+    window.on_next_frame(move |window, cx| {
+        window
+            .spawn(cx, async move |cx| {
+                if let Some(text) = platform::ask_text(&request) {
+                    let _ = this.update_in(cx, |this, window, cx| on_done(this, text, window, cx));
+                }
+            })
+            .detach();
+    });
+}
+
+/// The text of an alert that `ask_text` shows.
+pub struct TextRequest {
+    pub message: String,
+    pub info: String,
+    pub value: String,
+    pub placeholder: String,
+    pub ok: String,
+}
+
 fn with_active_window(cx: &mut App, f: impl FnOnce(&mut Window, &mut App)) {
     if let Some(handle) = cx.active_window() {
         let _ = handle.update(cx, |_, window, cx| f(window, cx));
@@ -536,7 +569,7 @@ mod platform {
         NSAlertFirstButtonReturn, NSAppearance,
         NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication, NSColor, NSColorSpace,
         NSEvent, NSFont, NSFontAttributeName, NSForegroundColorAttributeName, NSImage, NSMenu, NSMenuItem, NSStatusBar,
-        NSStatusItem, NSVariableStatusItemLength, NSView,
+        NSStatusItem, NSTextField, NSVariableStatusItemLength, NSView,
     };
     use objc2_foundation::{
         NSAttributedString, NSAttributedStringKey, NSData, NSDictionary, NSMutableAttributedString, NSObject,
@@ -593,6 +626,25 @@ mod platform {
             alert.addButtonWithTitle(&NSString::from_str(title));
         }
         usize::try_from(alert.runModal() - NSAlertFirstButtonReturn).ok()
+    }
+
+    pub(super) fn ask_text(request: &TextRequest) -> Option<String> {
+        let mtm = MainThreadMarker::new()?;
+        let alert = NSAlert::new(mtm);
+        alert.setMessageText(&NSString::from_str(&request.message));
+        alert.setInformativeText(&NSString::from_str(&request.info));
+        alert.addButtonWithTitle(&NSString::from_str(&request.ok));
+        // AppKit gives the Escape key to a button with the title "Cancel".
+        alert.addButtonWithTitle(&NSString::from_str("Cancel"));
+        let field = NSTextField::textFieldWithString(&NSString::from_str(&request.value), mtm);
+        field.setPlaceholderString(Some(&NSString::from_str(&request.placeholder)));
+        field.setFrame(objc2_foundation::NSRect::new(
+            objc2_foundation::NSPoint::new(0., 0.),
+            objc2_foundation::NSSize::new(260., 22.),
+        ));
+        alert.setAccessoryView(Some(&field));
+        alert.window().setInitialFirstResponder(Some(&field));
+        (alert.runModal() == NSAlertFirstButtonReturn).then(|| field.stringValue().to_string())
     }
 
     /// The system color of an accent color choice. `System` has no color
@@ -916,6 +968,9 @@ mod platform {
         true
     }
     pub(super) fn show_alert(_: &str, _: &str, _: &[&str]) -> Option<usize> {
+        None
+    }
+    pub(super) fn ask_text(_: &TextRequest) -> Option<String> {
         None
     }
     pub(super) fn autosave_frame(_: &Window, _: &'static str, _: &App) {}

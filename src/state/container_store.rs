@@ -82,6 +82,8 @@ pub struct EventPlan {
     pub resync: bool,
     pub refresh: Vec<String>,
     pub remove: Vec<String>,
+    /// A volume was created or deleted.
+    pub volumes: bool,
 }
 
 pub fn plan_events(batch: &[EngineEvent]) -> EventPlan {
@@ -102,6 +104,7 @@ pub fn plan_events(batch: &[EngineEvent]) -> EventPlan {
                 plan.link = Some(true);
                 plan.resync = true;
             }
+            EngineEvent::Volume => plan.volumes = true,
             EngineEvent::Container { id, action } => {
                 if action == "destroy" {
                     plan.remove.push(id.clone());
@@ -229,6 +232,9 @@ const STATUS_REFRESH: Duration = Duration::from_secs(30);
 #[derive(Clone, Debug)]
 pub enum StoreEvent {
     Changed,
+    /// The volume list is out of date: a volume event came, or the event
+    /// stream connected again.
+    VolumesChanged,
     Error(String),
 }
 
@@ -425,6 +431,9 @@ impl ContainerStore {
             Some(true) => self.status = EngineStatus::Connected,
             None => {}
         }
+        if plan.volumes || plan.resync {
+            cx.emit(StoreEvent::VolumesChanged);
+        }
         let mut changed = plan.link.is_some();
         for id in &plan.remove {
             changed |= self.set.remove(id);
@@ -611,7 +620,7 @@ impl ContainerStore {
 }
 
 /// Docker errors contain the HTTP status. Keep only the message.
-fn clean_error(e: &anyhow::Error) -> String {
+pub fn clean_error(e: &anyhow::Error) -> String {
     let s = e.to_string();
     let s = match s.split_once("status code ") {
         Some((_, rest)) => rest.split_once(": ").map_or(rest, |(_, msg)| msg),
@@ -639,6 +648,7 @@ mod tests {
             icon: None,
             created: 0,
             finished_at: None,
+            volumes: Vec::new(),
         }
     }
 
@@ -667,6 +677,14 @@ mod tests {
         let plan = plan_events(&[ev("a", "destroy"), ev("a", "create")]);
         assert_eq!(plan.refresh, vec!["a".to_string()]);
         assert!(plan.remove.is_empty());
+    }
+
+    #[test]
+    fn volume_events_mark_the_volumes() {
+        let plan = plan_events(&[ev("a", "start"), EngineEvent::Volume]);
+        assert!(plan.volumes);
+        assert_eq!(plan.refresh, vec!["a".to_string()]);
+        assert!(!plan_events(&[ev("a", "start")]).volumes);
     }
 
     #[test]

@@ -71,6 +71,8 @@ pub struct ContainerRow {
     /// epoch. The list does not include it, so only exited Compose members
     /// get it, from the inspect data.
     pub finished_at: Option<i64>,
+    /// The names of the volumes that the container mounts.
+    pub volumes: Vec<String>,
 }
 
 impl ContainerRow {
@@ -236,6 +238,13 @@ impl From<ContainerSummary> for ContainerRow {
             icon: labels.get(ICON_LABEL).cloned(),
             created: c.created.unwrap_or_default(),
             finished_at: None,
+            volumes: c
+                .mounts
+                .iter()
+                .flatten()
+                .filter(|m| m.typ.as_deref() == Some("volume"))
+                .filter_map(|m| m.name.clone())
+                .collect(),
         }
     }
 }
@@ -439,6 +448,7 @@ mod tests {
             icon: None,
             created: 0,
             finished_at: None,
+            volumes: Vec::new(),
         };
         assert_eq!(row.status_parts(), ("Running".into(), Some("2 hours".into())));
         row.state = State::Exited;
@@ -484,6 +494,7 @@ mod tests {
             icon: None,
             created: 0,
             finished_at: Some(at),
+            volumes: Vec::new(),
         };
         let mongo = member("mongo", "Exited (2) 6 minutes ago", 47_948);
         let redis = member("redis", "Exited (0) 6 minutes ago", 48_009);

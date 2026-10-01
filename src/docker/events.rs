@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use bollard::Docker;
+use bollard::models::EventMessageTypeEnum;
 use bollard::query_parameters::EventsOptions;
 use futures::StreamExt;
 
@@ -11,6 +12,9 @@ use futures::StreamExt;
 pub enum EngineEvent {
     /// A container changed. `action` is the Docker action, for example `start`.
     Container { id: String, action: String },
+    /// A volume was created, deleted, or pruned. The mount and unmount
+    /// actions are skipped, because the container rows show the mounts.
+    Volume,
     /// The stream (re)connected. The store must reload the full list.
     Resync,
     /// The engine does not answer. The stream tries again with backoff.
@@ -32,7 +36,7 @@ impl EngineEvent {
 const MIN_BACKOFF: Duration = Duration::from_millis(500);
 const MAX_BACKOFF: Duration = Duration::from_secs(2);
 
-/// Reads container events until `tx` closes. If the stream ends, it connects
+/// Reads container and volume events until `tx` closes. If the stream ends, it connects
 /// again with backoff (0.5 s to 2 s) and sends `Resync`.
 pub async fn pump(docker: Docker, tx: async_channel::Sender<EngineEvent>) {
     let mut backoff = MIN_BACKOFF;
@@ -65,7 +69,7 @@ pub async fn pump(docker: Docker, tx: async_channel::Sender<EngineEvent>) {
             since: Some(since.to_string()),
             filters: Some(HashMap::from([(
                 "type".to_string(),
-                vec!["container".to_string()],
+                vec!["container".to_string(), "volume".to_string()],
             )])),
             ..Default::default()
         };
@@ -76,6 +80,14 @@ pub async fn pump(docker: Docker, tx: async_channel::Sender<EngineEvent>) {
         while let Some(msg) = stream.next().await {
             let Ok(msg) = msg else { break };
             let action = msg.action.unwrap_or_default();
+            if msg.typ == Some(EventMessageTypeEnum::VOLUME) {
+                if matches!(action.as_str(), "create" | "destroy" | "prune")
+                    && tx.send(EngineEvent::Volume).await.is_err()
+                {
+                    return;
+                }
+                continue;
+            }
             let Some(id) = msg.actor.and_then(|a| a.id) else {
                 continue;
             };

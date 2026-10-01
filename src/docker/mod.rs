@@ -5,6 +5,7 @@ pub mod events;
 pub mod image_logo;
 pub mod logs;
 pub mod stats;
+pub mod volumes;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

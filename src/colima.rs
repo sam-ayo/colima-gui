@@ -174,6 +174,76 @@ pub fn ssh_in_terminal(profile: &str) -> Result<()> {
     Ok(())
 }
 
+/// The kind of an entry in a folder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EntryKind {
+    Folder,
+    File,
+    Link,
+    Other,
+}
+
+/// One entry of a folder in the VM.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Entry {
+    pub name: String,
+    pub kind: EntryKind,
+    pub size: u64,
+    /// The time of the last change, in seconds since the Unix epoch.
+    pub modified: i64,
+}
+
+/// The most entries that `list_folder` returns. A larger folder shows the
+/// first entries only.
+pub const MAX_ENTRIES: usize = 2000;
+
+/// Lists a folder in the VM of a profile. Root owns the Docker data, so
+/// the call uses `sudo`, which needs no password in a Colima VM. The folders
+/// come first, then the files, each sorted by name.
+///
+/// `colima ssh` quotes each argument for the shell in the VM, so a path
+/// with spaces or quotes is safe.
+pub fn list_folder(profile: &str, path: &str) -> Result<Vec<Entry>> {
+    let out = colima()
+        .args(["ssh", "--profile", profile, "--", "sudo", "find", path])
+        .args(["-mindepth", "1", "-maxdepth", "1", "-printf", r"%y\t%s\t%T@\t%f\0"])
+        .output()
+        .context("could not run `colima`. Make sure that it is on the PATH")?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        let last = err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("");
+        bail!("could not read the folder: {}", last.trim_start_matches("find: "));
+    }
+    Ok(parse_entries(&out.stdout))
+}
+
+/// Reads the output of `find -printf '%y\t%s\t%T@\t%f\0'`. The name is the
+/// last field, so a tab in a name does not break the line.
+fn parse_entries(out: &[u8]) -> Vec<Entry> {
+    let mut entries: Vec<Entry> = out
+        .split(|&b| b == 0)
+        .filter_map(|line| {
+            let line = String::from_utf8_lossy(line);
+            let mut parts = line.splitn(4, '\t');
+            let kind = match parts.next()? {
+                "d" => EntryKind::Folder,
+                "f" => EntryKind::File,
+                "l" => EntryKind::Link,
+                _ => EntryKind::Other,
+            };
+            let size = parts.next()?.parse().ok()?;
+            let modified = parts.next()?.split('.').next()?.parse().ok()?;
+            let name = parts.next()?.to_string();
+            Some(Entry { name, kind, size, modified })
+        })
+        .collect();
+    entries.sort_by(|a, b| {
+        (a.kind != EntryKind::Folder, &a.name).cmp(&(b.kind != EntryKind::Folder, &b.name))
+    });
+    entries.truncate(MAX_ENTRIES);
+    entries
+}
+
 fn run(args: &[&str]) -> Result<()> {
     let out = colima()
         .args(args)
@@ -191,6 +261,17 @@ fn run(args: &[&str]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn folder_entries_put_folders_first() {
+        let out = b"f\t416\t1788353434.0000000000\tkeyfile\0d\t4096\t1788353000.5\tjournal\0f\t3\t1\ta\tb\0";
+        let entries = parse_entries(out);
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["journal", "a\tb", "keyfile"]);
+        assert_eq!(entries[0].kind, EntryKind::Folder);
+        assert_eq!(entries[2].size, 416);
+        assert_eq!(entries[2].modified, 1_788_353_434);
+    }
 
     #[test]
     fn list_has_one_machine_on_each_line() {
