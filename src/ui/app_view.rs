@@ -3,7 +3,7 @@
 
 use std::cell::Cell;
 use std::rc::Rc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
@@ -60,6 +60,18 @@ const DETAIL_DEFAULT_FRACTION: f32 = 0.36;
 const LIST_MIN_WIDTH: f32 = 320.;
 /// The width of the resize handle at the left edge of the detail pane.
 const DETAIL_HANDLE_WIDTH: f32 = 6.;
+/// A drag past the minimum width pulls the pane out to the right, with
+/// friction. The pull gets nearer to this limit, but never gets to it.
+const DETAIL_PULL_LIMIT: f32 = 160.;
+/// A drag this far past the minimum width closes the pane, as a drag past
+/// the minimum width collapses the sidebar.
+const DETAIL_CLOSE_DISTANCE: f32 = 100.;
+/// A release of a pull at this speed or more closes the pane. The value is
+/// in pane widths per second.
+const DETAIL_FLICK_SPEED: f32 = 0.8;
+/// A pointer that stays still for this time before the release has no
+/// speed.
+const DETAIL_FLICK_WINDOW: Duration = Duration::from_millis(60);
 /// The spring that opens and collapses the sidebar. It is critically
 /// damped, so the edge does not bounce. It is almost at rest after about
 /// 200 ms, and a new toggle in the middle keeps the speed of the edge.
@@ -87,6 +99,9 @@ struct SidebarResize {
 
 /// The value of a detail pane resize drag.
 struct DetailResize {
+    /// The pane width that the user set at the start. A close by the drag
+    /// keeps it.
+    start_width: Option<Pixels>,
     /// The pointer position in the handle at the start.
     grab: Rc<Cell<Pixels>>,
 }
@@ -118,6 +133,17 @@ pub struct AppView {
     /// The time of the last spring step, or `None` when the spring is at
     /// rest.
     detail_stepped_at: Option<Instant>,
+    /// True while a resize drag moves the detail pane. The spring then
+    /// follows the pointer. At the release, the spring continues from the
+    /// speed of the pointer.
+    detail_follows_pointer: bool,
+    /// The time of the last move in a detail pane resize drag.
+    detail_pulled_at: Option<Instant>,
+    /// The pane width at the start of the last resize drag.
+    detail_drag_start: Option<Pixels>,
+    /// The pane width to use after a close by a drag. The pane keeps its
+    /// width while it goes out, so it does not jump.
+    detail_restore_width: Option<Option<Pixels>>,
     section: Section,
     /// The width of the sidebar panel that the user set, without the inset
     /// around it. A narrow window can show the panel narrower.
@@ -257,6 +283,10 @@ impl AppView {
             closing_detail: None,
             detail_spring: SpringState { position: 0., velocity: 0. },
             detail_stepped_at: None,
+            detail_follows_pointer: false,
+            detail_pulled_at: None,
+            detail_drag_start: None,
+            detail_restore_width: None,
             section: Section::Containers,
             sidebar_width: px(SIDEBAR_WIDTH),
             sidebar_collapsed: false,
@@ -414,9 +444,29 @@ impl AppView {
     /// Moves the detail spring one frame toward the target, and returns
     /// the part of the pane width that shows in this frame. At the end of
     /// a close, the pane that goes out is dropped.
-    fn step_detail(&mut self, window: &mut Window, cx: &App) -> f32 {
-        let target = if self.pane().is_some() { 1. } else { 0. };
+    fn step_detail(&mut self, window: &mut Window, cx: &mut Context<Self>) -> f32 {
         let now = Instant::now();
+        if self.detail_follows_pointer && !cx.has_active_drag() {
+            // The resize drag ended. A pointer that stopped before the
+            // release has no speed. A fast release of a pull closes the
+            // pane, and a slow release lets the spring bring it back.
+            self.detail_follows_pointer = false;
+            let still = self.detail_pulled_at.is_none_or(|at| now - at > DETAIL_FLICK_WINDOW);
+            if still {
+                self.detail_spring.velocity = 0.;
+            }
+            if self.pane().is_some()
+                && self.detail_spring.position < 1.
+                && self.detail_spring.velocity < -DETAIL_FLICK_SPEED
+            {
+                self.close_detail_by_drag(self.detail_drag_start, cx);
+            }
+        }
+        if self.detail_follows_pointer && self.pane().is_some() {
+            self.detail_stepped_at = None;
+            return self.detail_spring.position.clamp(0., 1.);
+        }
+        let target = if self.pane().is_some() { 1. } else { 0. };
         let spring = &mut self.detail_spring;
         if cx.reduce_motion() {
             *spring = SpringState { position: target, velocity: 0. };
@@ -436,6 +486,9 @@ impl AppView {
         } else if target == 0. {
             // A dropped detail view drops its log stream too.
             self.closing_detail = None;
+            if let Some(width) = self.detail_restore_width.take() {
+                self.detail_width = width;
+            }
         }
         spring.position.clamp(0., 1.)
     }
@@ -477,12 +530,59 @@ impl AppView {
         let main_width = window_width - px(self.sidebar_spring.position.max(0.));
         // The center of the handle is on the left edge of the pane.
         let edge = x - drag.grab.get() + px(DETAIL_HANDLE_WIDTH / 2.);
-        let width = (window_width - edge)
+        let pointer_width = f32::from(window_width - edge);
+        let width = px(pointer_width)
             .min(Self::detail_max_width(main_width))
             .max(px(DETAIL_MIN_WIDTH));
-        if self.detail_width != Some(width) {
-            self.detail_width = Some(width);
-            cx.notify();
+        self.detail_drag_start = drag.start_width;
+
+        // Past the minimum width, the pane goes out to the right with
+        // friction. The more the drag goes, the less the pane moves.
+        let past = (DETAIL_MIN_WIDTH - pointer_width).max(0.);
+        let pull = past * DETAIL_PULL_LIMIT / (past + DETAIL_PULL_LIMIT);
+        let position = 1. - pull / f32::from(width);
+
+        // Measure the speed of the pane, so a close or a release continues
+        // the movement of the pointer. The average keeps it smooth when
+        // the moves come fast.
+        let now = Instant::now();
+        let velocity = match self.detail_pulled_at {
+            Some(at) if self.detail_follows_pointer => {
+                let elapsed = now.duration_since(at).as_secs_f32().max(0.001);
+                let measured = (position - self.detail_spring.position) / elapsed;
+                0.5 * measured + 0.5 * self.detail_spring.velocity
+            }
+            _ => 0.,
+        };
+        self.detail_pulled_at = Some(now);
+        self.detail_follows_pointer = true;
+        self.detail_spring = SpringState { position, velocity };
+
+        if past >= DETAIL_CLOSE_DISTANCE {
+            self.close_detail_by_drag(drag.start_width, cx);
+            return;
+        }
+        self.detail_width = Some(width);
+        cx.notify();
+    }
+
+    /// Closes the detail pane at the end of a pull. The spring continues
+    /// from the position and the speed of the pull, so the pane does not
+    /// stop or jump. The pane opens again at `start_width`, the width from
+    /// before the drag.
+    fn close_detail_by_drag(&mut self, start_width: Option<Pixels>, cx: &mut Context<Self>) {
+        self.detail_follows_pointer = false;
+        // The pane goes out at least as fast as the pull.
+        self.detail_spring.velocity = self.detail_spring.velocity.min(0.);
+        self.detail_restore_width = Some(start_width);
+        let section = self.section;
+        self.close_pane(section, true, cx);
+        // The list clears its selection, as after a click on the close
+        // button. Its event then finds no pane to close.
+        match section {
+            Section::Containers => self.list.update(cx, |l, cx| l.clear_selection(cx)),
+            Section::Volumes => self.volume_list.update(cx, |l, cx| l.clear_selection(cx)),
+            _ => {}
         }
     }
 
@@ -653,6 +753,9 @@ impl AppView {
         // frequent. A change to a different container keeps the pane
         // where it is.
         self.closing_detail = None;
+        if let Some(width) = self.detail_restore_width.take() {
+            self.detail_width = width;
+        }
         if !pointer {
             self.detail_spring = SpringState { position: 1., velocity: 0. };
         }
@@ -715,6 +818,9 @@ impl AppView {
     fn open_volume_detail(&mut self, name: String, pointer: bool, window: &mut Window, cx: &mut Context<Self>) {
         // The pane moves as the container pane does. See `open_detail`.
         self.closing_detail = None;
+        if let Some(width) = self.detail_restore_width.take() {
+            self.detail_width = width;
+        }
         if !pointer {
             self.detail_spring = SpringState { position: 1., velocity: 0. };
         }
@@ -941,7 +1047,10 @@ impl Render for AppView {
                                             .occlude()
                                             .cursor_col_resize()
                                             .on_drag(
-                                                DetailResize { grab: Rc::default() },
+                                                DetailResize {
+                                                    start_width: self.detail_width,
+                                                    grab: Rc::default(),
+                                                },
                                                 |drag, offset, _, cx| {
                                                     drag.grab.set(offset.x);
                                                     cx.new(|_| ResizeDrag)
