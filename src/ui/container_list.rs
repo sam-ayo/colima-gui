@@ -1144,7 +1144,11 @@ impl Render for ContainerList {
                                     .text_size(px(text::CALLOUT))
                                     .font_features(tabular_nums())
                                     .text_color(t.muted_foreground)
-                                    .child(format!("{running} running · {stopped} stopped")),
+                                    .child(if self.running_only && stopped > 0 {
+                                        format!("{running} running · {stopped} stopped (hidden)")
+                                    } else {
+                                        format!("{running} running · {stopped} stopped")
+                                    }),
                             ),
                     )
                     .child(drag_area("list-drag").flex_1().h_full())
@@ -1163,11 +1167,14 @@ impl Render for ContainerList {
                     .child(
                         Button::new("running-only")
                             .icon(Icon::new(IconName::ListFilter))
-                            .ghost()
+                            .custom(native::toolbar_button(cx))
                             .small()
                             .selected(self.running_only)
-                            .tooltip(if self.running_only {
-                                "Show all containers"
+                            // The tooltip names the filter, and the selected
+                            // state shows if the filter is on. With no
+                            // stopped containers, the filter hides nothing.
+                            .tooltip(if stopped == 0 {
+                                "Show running containers only (⇧⌘R). No containers are stopped."
                             } else {
                                 "Show running containers only (⇧⌘R)"
                             })
@@ -1179,7 +1186,7 @@ impl Render for ContainerList {
                     .child(
                         Button::new("toggle-search")
                             .icon(Icon::new(IconName::Search))
-                            .ghost()
+                            .custom(native::toolbar_button(cx))
                             .small()
                             .selected(self.search_open)
                             .tooltip("Search (⌘F)")

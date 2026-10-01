@@ -223,6 +223,30 @@ pub fn hover(cx: &App) -> Hsla {
     selection(false, cx).opacity(0.5)
 }
 
+/// The fill of a toolbar control under the pointer. The detail tabs and the
+/// toolbar buttons use it, so the two hover states look the same.
+pub fn control_hover(cx: &App) -> Hsla {
+    if gpui_component::ActiveTheme::theme(cx).is_dark() {
+        white().opacity(0.08)
+    } else {
+        black().opacity(0.05)
+    }
+}
+
+/// The style of an icon button in a toolbar. The ghost style of the
+/// components has a hover fill that is almost invisible on these surfaces,
+/// so this style uses the hover fill of the detail tabs.
+pub fn toolbar_button(cx: &App) -> gpui_component::button::ButtonCustomVariant {
+    let t = gpui_component::ActiveTheme::theme(cx);
+    let active = if t.is_dark() { white().opacity(0.14) } else { black().opacity(0.1) };
+    gpui_component::button::ButtonCustomVariant::new(cx)
+        .color(transparent_black())
+        .foreground(t.secondary_foreground)
+        .hover(control_hover(cx))
+        .active(active)
+        .shadow(false)
+}
+
 /// True when a selected row uses the accent fill and white text.
 pub fn has_emphasized_selection(cx: &App) -> bool {
     cx.has_global::<SystemAccent>()

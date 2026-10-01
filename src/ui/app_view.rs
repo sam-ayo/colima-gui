@@ -411,7 +411,7 @@ impl AppView {
             .child(
                 Button::new("toggle-sidebar")
                     .icon(Icon::new(IconName::PanelLeft))
-                    .ghost()
+                    .custom(native::toolbar_button(cx))
                     .small()
                     .tooltip(if self.sidebar_collapsed {
                         "Show the sidebar (⌃⌘S)"

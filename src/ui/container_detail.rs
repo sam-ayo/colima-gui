@@ -20,7 +20,7 @@ use crate::ui::logs_view::LogsView;
 use crate::ui::stats_view::StatsView;
 use crate::ui::{
     ENTER_DURATION, NATIVE_BUTTON_HEIGHT, SNAPPY_SPRING, TOOLBAR_HEIGHT, code_line, delayed_reveal,
-    drag_area, spinner, tabular_nums, text,
+    drag_area, native, spinner, tabular_nums, text,
 };
 
 const INSPECT_LINE_HEIGHT: f32 = 18.;
@@ -249,7 +249,7 @@ impl ContainerDetail {
         let track = if dark { white().opacity(0.06) } else { black().opacity(0.06) };
         let selected_bg = if dark { white().opacity(0.22) } else { white() };
         let selected_border = if dark { white().opacity(0.12) } else { black().opacity(0.1) };
-        let hover_bg = if dark { white().opacity(0.08) } else { black().opacity(0.05) };
+        let hover_bg = native::control_hover(cx);
         let fg = t.foreground;
         let muted = t.muted_foreground;
         let radius = t.radius;
@@ -730,7 +730,7 @@ impl Render for ContainerDetail {
                     .child(
                         Button::new("close-detail")
                             .icon(Icon::new(IconName::X))
-                            .ghost()
+                            .custom(native::toolbar_button(cx))
                             .xsmall()
                             .tooltip("Close (Esc)")
                             .on_click(cx.listener(|_, _, _, cx| cx.emit(DetailEvent::Close))),
