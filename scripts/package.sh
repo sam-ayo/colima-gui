@@ -11,6 +11,17 @@
 # Output: target/package/<arch>/Colima.app and
 #         target/package/<arch>/colima-gui-<version>-<arch>.pkg
 # Needs: cargo, curl, and the Xcode command line tools (pkgbuild).
+#
+# Signature and notarization. Without these variables, the script makes an
+# unsigned package, and Gatekeeper blocks it on other Macs.
+#   CODESIGN_IDENTITY: the "Developer ID Application" certificate, for
+#     example "Developer ID Application: Name (TEAMID)".
+#   INSTALLER_IDENTITY: the "Developer ID Installer" certificate.
+#   Notarization needs INSTALLER_IDENTITY and one of these:
+#     NOTARY_PROFILE: a keychain profile from `xcrun notarytool
+#       store-credentials`.
+#     NOTARY_KEY_FILE, NOTARY_KEY_ID, and NOTARY_ISSUER: an App Store
+#       Connect API key (the .p8 file), its key ID, and its issuer ID.
 
 set -euo pipefail
 
@@ -87,9 +98,11 @@ mkdir -p "$app/Contents/MacOS" "$tools/bin"
 cp "$target/$rust_target/release/colima-gui" "$app/Contents/MacOS/colima-gui"
 
 # Lima finds its guest agents in ../share/lima, next to bin/limactl. Keep the
-# layout of the archive. Do not sign the tools again: limactl has the
-# virtualization entitlement, and a new signature removes it.
-tar xzf "$cache/$lima_file" -C "$tools" ./bin ./libexec ./share/lima
+# layout of the archive. Leave out the guest agent for macOS guests, because
+# Colima runs only Linux guests. It is an unsigned binary in a gzip file, and
+# notarization rejects it.
+tar xzf "$cache/$lima_file" -C "$tools" --exclude './share/lima/lima-guestagent.Darwin-*' \
+    ./bin ./libexec ./share/lima
 install -m 755 "$cache/$colima_file-$COLIMA_VERSION" "$tools/bin/colima"
 tar xzf "$cache/docker-$docker_arch-$DOCKER_VERSION.tgz" -C "$cache" docker/docker
 install -m 755 "$cache/docker/docker" "$tools/bin/docker"
@@ -120,6 +133,32 @@ cat > "$app/Contents/Info.plist" <<EOF
 </dict>
 </plist>
 EOF
+
+# Notarization needs a Developer ID signature, the hardened runtime, and a
+# secure timestamp on all of the code. The tools have ad hoc signatures, so
+# sign them again. limactl has the virtualization entitlement, and a new
+# signature removes it. Thus copy the entitlements of each tool to its new
+# signature. Sign the bundle last, because its seal includes the tools.
+if [ -n "${CODESIGN_IDENTITY:-}" ]; then
+    echo "sign the app with $CODESIGN_IDENTITY"
+    entitlements="$cache/entitlements.plist"
+    find "$tools" -type f -perm -u+x | while read -r file; do
+        if ! file -b "$file" | grep -q Mach-O; then
+            continue
+        fi
+        rm -f "$entitlements"
+        codesign -d --entitlements - --xml "$file" > "$entitlements" 2>/dev/null || true
+        args=()
+        if [ -s "$entitlements" ]; then
+            args=(--entitlements "$entitlements")
+        fi
+        codesign --force --options runtime --timestamp \
+            --sign "$CODESIGN_IDENTITY" "${args[@]+"${args[@]}"}" "$file"
+    done
+    codesign --force --options runtime --timestamp \
+        --sign "$CODESIGN_IDENTITY" "$app"
+    codesign --verify --deep --strict "$app"
+fi
 
 # The installer package. The postinstall script links the tools.
 pkgroot="$cache/pkgroot-$arch"
@@ -152,6 +191,11 @@ component_plist="$cache/component-$arch.plist"
 pkgbuild --analyze --root "$pkgroot" "$component_plist" >/dev/null
 plutil -replace 0.BundleIsRelocatable -bool NO "$component_plist"
 
+sign_args=()
+if [ -n "${INSTALLER_IDENTITY:-}" ]; then
+    sign_args=(--sign "$INSTALLER_IDENTITY" --timestamp)
+fi
+
 pkg="$out/colima-gui-$version-$arch.pkg"
 pkgbuild \
     --root "$pkgroot" \
@@ -160,7 +204,36 @@ pkgbuild \
     --identifier "$BUNDLE_ID.pkg" \
     --version "$version" \
     --install-location / \
+    "${sign_args[@]+"${sign_args[@]}"}" \
     "$pkg"
+
+# Apple examines the package and the app in it. The staple step attaches the
+# ticket to the package, so that Gatekeeper can accept it without a network
+# connection. The update signature (scripts/sign-release.sh) must come after
+# this step, because the staple step changes the package.
+notary_args=()
+if [ -n "${NOTARY_PROFILE:-}" ]; then
+    notary_args=(--keychain-profile "$NOTARY_PROFILE")
+elif [ -n "${NOTARY_KEY_FILE:-}" ]; then
+    notary_args=(--key "$NOTARY_KEY_FILE" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER")
+fi
+if [ -n "${INSTALLER_IDENTITY:-}" ] && [ ${#notary_args[@]} -gt 0 ]; then
+    echo "notarize $pkg"
+    xcrun notarytool submit "$pkg" "${notary_args[@]}" --wait --timeout 1h \
+        --output-format json > "$cache/notary-$arch.json" || true
+    status="$(plutil -extract status raw "$cache/notary-$arch.json" 2>/dev/null || true)"
+    if [ "$status" != "Accepted" ]; then
+        cat "$cache/notary-$arch.json" >&2
+        id="$(plutil -extract id raw "$cache/notary-$arch.json" 2>/dev/null || true)"
+        if [ -n "$id" ]; then
+            xcrun notarytool log "$id" "${notary_args[@]}" >&2 || true
+        fi
+        echo "notarization failed" >&2
+        exit 1
+    fi
+    xcrun stapler staple "$pkg"
+    spctl --assess --type install --verbose "$pkg"
+fi
 
 echo
 echo "app: $app"
