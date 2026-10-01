@@ -1,6 +1,14 @@
 # Builds a release when a tag such as v0.2.0 is pushed, and publishes it to
 # the public releases repository. The app looks for updates there.
 #
+# A run on a tag cannot use the cache of a different tag. It can use the
+# cache of main. Thus a push to main that changes the dependencies runs only
+# the compile step, and saves the cache for the next tag. To make this cache
+# manually, run this workflow on main from the Actions tab.
+#
+# A pull request that changes the dependencies or this file builds the
+# packages and signs them with a temporary key. It does not publish.
+#
 # Secrets:
 #   UPDATE_SIGNING_KEY: the PEM text of the Ed25519 release key.
 #   RELEASES_TOKEN: a token that can write the contents of
@@ -14,14 +22,40 @@ name: Release
 on:
   push:
     tags: ["v*"]
+    branches: [main]
+    # GitHub does not use these paths for tags.
+    paths:
+      - Cargo.lock
+      - Cargo.toml
+      - .github/workflows/release.yml
+  pull_request:
+    paths:
+      - Cargo.lock
+      - Cargo.toml
+      - .github/workflows/release.yml
+      - scripts/package.sh
+      - scripts/sign-release.sh
+  workflow_dispatch:
+
+env:
+  # A tag or a pull request builds the packages. Other runs only compile.
+  PACKAGE: ${{ github.ref_type == 'tag' || github.event_name == 'pull_request' }}
 
 jobs:
-  release:
+  build:
     runs-on: macos-15
+    strategy:
+      matrix:
+        include:
+          - arch: arm64
+            rust_target: aarch64-apple-darwin
+          - arch: x86_64
+            rust_target: x86_64-apple-darwin
     steps:
       - uses: actions/checkout@v5
 
       - name: Check the version
+        if: github.ref_type == 'tag'
         run: |
           version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
           if [ "v$version" != "$GITHUB_REF_NAME" ]; then
@@ -29,26 +63,70 @@ jobs:
             exit 1
           fi
 
+      - name: Install the Rust target
+        run: rustup target add ${{ matrix.rust_target }}
+
+      # Only main saves the cache, because other refs cannot use it.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ matrix.arch }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Compile
+        if: env.PACKAGE != 'true'
+        run: cargo build --release --target ${{ matrix.rust_target }}
+
+      - name: Build the package
+        if: env.PACKAGE == 'true'
+        run: scripts/package.sh ${{ matrix.arch }}
+
+      - uses: actions/upload-artifact@v4
+        if: env.PACKAGE == 'true'
+        with:
+          name: package-${{ matrix.arch }}
+          path: target/package/${{ matrix.arch }}/*.pkg
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: github.ref_type == 'tag' || github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
       - name: Get the release notes
+        if: github.ref_type == 'tag'
         run: |
           git fetch --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
           git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > "$RUNNER_TEMP/notes.txt"
 
-      - name: Install the Rust targets
-        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: package-*
+          path: release-files
+          merge-multiple: true
 
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Build and sign
+      - name: Sign
+        if: github.ref_type == 'tag'
         env:
           UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
-        run: scripts/release.sh "$RUNNER_TEMP/notes.txt"
+        run: scripts/sign-release.sh release-files "$RUNNER_TEMP/notes.txt"
+
+      # A pull request must not use the release key.
+      - name: Sign with a temporary key
+        if: github.ref_type != 'tag'
+        run: |
+          openssl genpkey -algorithm ed25519 -out "$RUNNER_TEMP/test-key.pem"
+          UPDATE_SIGNING_KEY_FILE="$RUNNER_TEMP/test-key.pem" scripts/sign-release.sh release-files
+          cat release-files/latest.json
+          ls -l release-files
 
       - name: Publish
+        if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
         run: |
-          gh release create "$GITHUB_REF_NAME" target/release-files/* \
+          gh release create "$GITHUB_REF_NAME" release-files/* \
             --repo sam-ayo/colima-gui-releases \
             --title "Colima $GITHUB_REF_NAME" \
             --notes-file "$RUNNER_TEMP/notes.txt"
