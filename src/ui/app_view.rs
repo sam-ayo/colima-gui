@@ -759,7 +759,16 @@ impl Render for AppView {
                 .flex_1()
                 .min_w_0()
                 .h_full()
-                .child(div().flex_1().min_w_0().h_full().child(self.list.clone()))
+                // The cached views render again only after their own
+                // notify, so a log line or a stats tick in the detail pane
+                // does not render the list again.
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .child(self.list.clone().cached(StyleRefinement::default().size_full())),
+                )
                 .when_some(self.detail.clone().or_else(|| self.closing_detail.clone()), |d, detail| {
                     let open = self.detail.is_some();
                     // The pane sits at the left edge of its area, and the
@@ -772,7 +781,12 @@ impl Render for AppView {
                         .left_0()
                         .size_full()
                         .overflow_hidden()
-                        .child(div().w(detail_width).h_full().child(detail));
+                        .child(
+                            div()
+                                .w(detail_width)
+                                .h_full()
+                                .child(detail.cached(StyleRefinement::default().size_full())),
+                        );
                     d.child(
                         div()
                             .relative()

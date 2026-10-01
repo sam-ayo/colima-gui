@@ -64,8 +64,13 @@ impl LogBuffer {
     }
 
     fn line_matches(filter: &str, line: &LogLine) -> bool {
-        // `filter` is already lower case.
-        line.text.to_lowercase().contains(filter)
+        // `filter` is already lower case. An ASCII filter does not need a
+        // lower-case copy of each line, so a filter of many lines stays fast.
+        if filter.is_ascii() {
+            contains_ignore_ascii_case(line.text.as_bytes(), filter.as_bytes())
+        } else {
+            line.text.to_lowercase().contains(filter)
+        }
     }
 
     /// Adds lines at the end. Returns the number of visible lines that the
@@ -116,6 +121,15 @@ impl LogBuffer {
     }
 }
 
+/// True if `haystack` contains `needle`, with no case for the ASCII letters.
+/// `needle` must be lower case.
+fn contains_ignore_ascii_case(haystack: &[u8], needle: &[u8]) -> bool {
+    needle.is_empty()
+        || haystack
+            .windows(needle.len())
+            .any(|w| w.iter().zip(needle).all(|(a, b)| a.to_ascii_lowercase() == *b))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,5 +173,15 @@ mod tests {
         b.set_filter("");
         assert_eq!(b.visible_len(), 4);
         assert_eq!(b.visible_line(0).unwrap().text, "c err");
+    }
+
+    #[test]
+    fn filter_ignores_case() {
+        let mut b = LogBuffer::new();
+        b.extend(["An ERROR here", "fine", "Über Fehler", "über"].map(line));
+        b.set_filter("Error");
+        assert_eq!(b.visible_len(), 1);
+        b.set_filter("ÜBER");
+        assert_eq!(b.visible_len(), 2);
     }
 }

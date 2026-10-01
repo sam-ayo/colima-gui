@@ -624,7 +624,8 @@ impl Render for ContainerDetail {
             (DetailTab::Info, Some(row)) => self.render_info(row, cx),
             (DetailTab::Info, None) => div().into_any_element(),
             (DetailTab::Logs, _) => match &self.logs {
-                Some(logs) => logs.clone().into_any_element(),
+                // A stats tick renders this pane again, but not the logs.
+                Some(logs) => logs.clone().cached(StyleRefinement::default().size_full()).into_any_element(),
                 None => div().into_any_element(),
             },
             (DetailTab::Stats, _) => {
