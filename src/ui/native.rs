@@ -22,7 +22,8 @@ actions!(
         CloseWindow,
         Minimize,
         Zoom,
-        ColimaHelp
+        ColimaHelp,
+        ToggleMenuBarItem
     ]
 );
 
@@ -76,6 +77,16 @@ impl AccentColor {
 }
 
 impl Global for AccentColor {}
+
+/// True when the app shows its status item in the menu bar. The app keeps
+/// the choice between launches.
+#[derive(Clone, Copy)]
+pub struct ShowInMenuBar(pub bool);
+
+impl Global for ShowInMenuBar {}
+
+/// The key of the saved menu bar choice in the user defaults.
+const MENU_BAR_KEY: &str = "ShowInMenuBar";
 
 /// Changes the accent color and saves the choice.
 #[derive(Action, Clone, PartialEq, Deserialize)]
@@ -303,8 +314,16 @@ pub fn init_menus(cx: &mut App) {
         });
     });
 
+    cx.on_action(|_: &ToggleMenuBarItem, cx| {
+        let show = !cx.global::<ShowInMenuBar>().0;
+        platform::save_string(MENU_BAR_KEY, if show { "1" } else { "0" });
+        cx.set_global(ShowInMenuBar(show));
+        set_menus(cx);
+    });
+
     let saved = platform::saved_accent().and_then(|name| AccentColor::from_name(&name));
     cx.set_global(saved.unwrap_or_default());
+    cx.set_global(ShowInMenuBar(platform::saved_string(MENU_BAR_KEY).as_deref() != Some("0")));
     set_menus(cx);
 }
 
@@ -318,6 +337,7 @@ fn set_menus(cx: &mut App) {
     let accent_item = |c: AccentColor| MenuItem::action(c.name(), SetAccentColor(c)).checked(c == current);
     let mut accent_items = vec![accent_item(AccentColor::System), MenuItem::separator()];
     accent_items.extend(AccentColor::COLORS.map(accent_item));
+    let in_menu_bar = cx.try_global::<ShowInMenuBar>().is_some_and(|s| s.0);
 
     cx.set_menus([
         Menu::new(APP_NAME).items([
@@ -349,6 +369,7 @@ fn set_menus(cx: &mut App) {
             MenuItem::action("Show Running Containers Only", ToggleRunningOnly),
             MenuItem::separator(),
             MenuItem::submenu(Menu::new("Accent Color").items(accent_items)),
+            MenuItem::action("Show in Menu Bar", ToggleMenuBarItem).checked(in_menu_bar),
             // AppKit adds "Enter Full Screen" to this menu.
         ]),
         Menu::new("Container").items([
@@ -437,6 +458,57 @@ pub fn show_context_menu<T: 'static>(
     });
 }
 
+/// A line of the menu of the status item.
+pub enum StatusLine {
+    Item {
+        label: SharedString,
+        enabled: bool,
+        /// The indentation level. The members of a Compose project have 1.
+        indent: isize,
+        dot: Option<Dot>,
+        /// The value that `on_choose` gets. An item with no tag does nothing,
+        /// for example an item that opens a submenu.
+        tag: Option<usize>,
+        submenu: Vec<StatusLine>,
+    },
+    Separator,
+}
+
+/// The colored dot in front of a container in the status menu.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Dot {
+    Running,
+    /// The container changes state, or it is paused.
+    Busy,
+    Failed,
+    Stopped,
+}
+
+/// The status item of the app in the menu bar. The item goes away when
+/// this value drops.
+pub struct StatusItem(platform::StatusItem);
+
+impl StatusItem {
+    /// Adds the item to the menu bar. When the user chooses a menu item,
+    /// `on_choose` gets its tag. `on_choose` runs in an AppKit callback, so
+    /// it must not update GPUI entities. Send the tag to a task instead.
+    ///
+    /// Returns `None` on other platforms.
+    pub fn new(on_choose: impl Fn(usize) + 'static) -> Option<Self> {
+        platform::new_status_item(Box::new(on_choose)).map(StatusItem)
+    }
+
+    /// Replaces the lines of the menu. An open menu shows the change at once.
+    pub fn set_lines(&self, lines: &[StatusLine]) {
+        self.0.set_lines(lines)
+    }
+
+    /// Shows the icon in gray when the engine does not run.
+    pub fn set_dimmed(&self, dimmed: bool) {
+        self.0.set_dimmed(dimmed)
+    }
+}
+
 struct SystemColors {
     label: Hsla,
     secondary_label: Hsla,
@@ -458,14 +530,18 @@ mod platform {
     use block2::RcBlock;
     use objc2::rc::Retained;
     use objc2::runtime::AnyObject;
-    use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
+    use objc2::{AllocAnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
     use objc2_app_kit::{
         NSAboutPanelOptionApplicationName, NSAboutPanelOptionApplicationVersion, NSAlert,
         NSAlertFirstButtonReturn, NSAppearance,
         NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication, NSColor, NSColorSpace,
-        NSEvent, NSImage, NSMenu, NSMenuItem, NSView,
+        NSEvent, NSFont, NSFontAttributeName, NSForegroundColorAttributeName, NSImage, NSMenu, NSMenuItem, NSStatusBar,
+        NSStatusItem, NSVariableStatusItemLength, NSView,
     };
-    use objc2_foundation::{NSData, NSDictionary, NSObject, NSString, NSUserDefaults};
+    use objc2_foundation::{
+        NSAttributedString, NSAttributedStringKey, NSData, NSDictionary, NSMutableAttributedString, NSObject,
+        NSString, NSUserDefaults,
+    };
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
     use super::*;
@@ -681,6 +757,144 @@ mod platform {
         menu.popUpMenuPositioningItem_atLocation_inView(None, NSEvent::mouseLocation(), None);
         usize::try_from(target.ivars().get()).ok()
     }
+
+    define_class!(
+        /// The target of the status menu items. It gives the tag of the
+        /// chosen item to the callback.
+        #[unsafe(super(NSObject))]
+        #[thread_kind = MainThreadOnly]
+        #[name = "ColimaStatusTarget"]
+        #[ivars = Box<dyn Fn(usize)>]
+        struct StatusTarget;
+
+        impl StatusTarget {
+            #[unsafe(method(choose:))]
+            fn choose(&self, item: &NSMenuItem) {
+                if let Ok(tag) = usize::try_from(item.tag()) {
+                    (self.ivars())(tag);
+                }
+            }
+        }
+    );
+
+    pub(in super::super) struct StatusItem {
+        item: Retained<NSStatusItem>,
+        menu: Retained<NSMenu>,
+        target: Retained<StatusTarget>,
+    }
+
+    pub(super) fn new_status_item(on_choose: Box<dyn Fn(usize)>) -> Option<StatusItem> {
+        let mtm = MainThreadMarker::new()?;
+        let item = NSStatusBar::systemStatusBar().statusItemWithLength(NSVariableStatusItemLength);
+        if let Some(button) = item.button(mtm) {
+            // The PNG has 2x pixels for an 18 pt icon. A template image
+            // follows the color of the menu bar.
+            let data = NSData::with_bytes(include_bytes!("../../assets/icon/menu-bar.png"));
+            let image = NSImage::initWithData(mtm.alloc(), &data);
+            if let Some(image) = &image {
+                image.setSize(objc2_foundation::NSSize::new(18., 18.));
+                image.setTemplate(true);
+                image.setAccessibilityDescription(Some(&NSString::from_str(APP_NAME)));
+            }
+            button.setImage(image.as_deref());
+            button.setToolTip(Some(&NSString::from_str(APP_NAME)));
+        }
+        let menu = NSMenu::new(mtm);
+        menu.setAutoenablesItems(false);
+        item.setMenu(Some(&menu));
+        let target = StatusTarget::alloc(mtm).set_ivars(on_choose);
+        let target: Retained<StatusTarget> = unsafe { msg_send![super(target), init] };
+        Some(StatusItem { item, menu, target })
+    }
+
+    impl StatusItem {
+        pub(super) fn set_lines(&self, lines: &[StatusLine]) {
+            fill_status_menu(&self.menu, lines, &self.target, self.menu.mtm());
+        }
+
+        pub(super) fn set_dimmed(&self, dimmed: bool) {
+            if let Some(button) = self.item.button(self.menu.mtm()) {
+                button.setAppearsDisabled(dimmed);
+            }
+        }
+    }
+
+    impl Drop for StatusItem {
+        fn drop(&mut self) {
+            NSStatusBar::systemStatusBar().removeStatusItem(&self.item);
+        }
+    }
+
+    fn fill_status_menu(menu: &NSMenu, lines: &[StatusLine], target: &StatusTarget, mtm: MainThreadMarker) {
+        menu.removeAllItems();
+        for line in lines {
+            let item = match line {
+                StatusLine::Separator => NSMenuItem::separatorItem(mtm),
+                StatusLine::Item { label, enabled, indent, dot, tag, submenu } => {
+                    let item = unsafe {
+                        NSMenuItem::initWithTitle_action_keyEquivalent(
+                            mtm.alloc(),
+                            &NSString::from_str(label),
+                            tag.map(|_| sel!(choose:)),
+                            &NSString::new(),
+                        )
+                    };
+                    if let Some(tag) = tag {
+                        unsafe { item.setTarget(Some(target)) };
+                        item.setTag(*tag as isize);
+                    }
+                    item.setEnabled(*enabled);
+                    item.setIndentationLevel(*indent);
+                    if let Some(dot) = dot {
+                        item.setAttributedTitle(Some(&dot_title(label, *dot)));
+                    }
+                    if !submenu.is_empty() {
+                        let sub = NSMenu::new(mtm);
+                        sub.setAutoenablesItems(false);
+                        fill_status_menu(&sub, submenu, target, mtm);
+                        item.setSubmenu(Some(&sub));
+                    }
+                    item
+                }
+            };
+            menu.addItem(&item);
+        }
+    }
+
+    /// A title with a colored dot in front of the label. AppKit does not
+    /// show the images of the status menu items on recent macOS versions,
+    /// so the dot is a text character.
+    fn dot_title(label: &str, dot: Dot) -> Retained<NSAttributedString> {
+        let color = match dot {
+            Dot::Running => NSColor::systemGreenColor(),
+            Dot::Busy => NSColor::systemYellowColor(),
+            Dot::Failed => NSColor::systemRedColor(),
+            Dot::Stopped => NSColor::tertiaryLabelColor(),
+        };
+        let font = NSFont::menuFontOfSize(0.);
+        let text = |s: &str, color: Option<&NSColor>| {
+            let (keys, values): (Vec<&NSAttributedStringKey>, Vec<&AnyObject>) = match color {
+                Some(c) => (
+                    unsafe { vec![NSFontAttributeName, NSForegroundColorAttributeName] },
+                    vec![&*font as &AnyObject, c as &AnyObject],
+                ),
+                None => (unsafe { vec![NSFontAttributeName] }, vec![&*font as &AnyObject]),
+            };
+            let attrs = NSDictionary::from_slices(&keys, &values);
+            // SAFETY: the font and the color are the value types of these keys.
+            unsafe {
+                NSAttributedString::initWithString_attributes(
+                    NSAttributedString::alloc(),
+                    &NSString::from_str(s),
+                    Some(&attrs),
+                )
+            }
+        };
+        let title = NSMutableAttributedString::new();
+        title.appendAttributedString(&text("\u{25CF}  ", Some(&color)));
+        title.appendAttributedString(&text(label, None));
+        title.into_super()
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -708,6 +922,17 @@ mod platform {
     pub(super) fn set_app_icon(_: &[u8]) {}
     pub(super) fn show_about_panel(_: &str, _: &str) {}
     pub(super) fn pop_up_menu(_: &[MenuEntry]) -> Option<usize> {
+        None
+    }
+
+    pub(in super::super) struct StatusItem;
+
+    impl StatusItem {
+        pub(super) fn set_lines(&self, _: &[StatusLine]) {}
+        pub(super) fn set_dimmed(&self, _: bool) {}
+    }
+
+    pub(super) fn new_status_item(_: Box<dyn Fn(usize)>) -> Option<StatusItem> {
         None
     }
 }

@@ -271,6 +271,25 @@ impl ContainerList {
         self.select(None, true, cx);
     }
 
+    /// Selects a container, and scrolls to it. A collapsed group of the
+    /// container expands.
+    pub fn reveal(&mut self, id: &str, cx: &mut Context<Self>) {
+        let project = self.store.read(cx).set.rows.get(id).and_then(|r| r.compose_project.clone());
+        if let Some(project) = project
+            && self.collapsed.remove(&project)
+        {
+            self.rebuild(cx);
+        }
+        let ix = self
+            .items
+            .iter()
+            .position(|item| matches!(item, ListItem::Row { id: row, .. } if row == id));
+        if let Some(ix) = ix {
+            self.scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
+        }
+        self.select(Some(id.to_string()), false, cx);
+    }
+
     fn toggle_group(&mut self, project: &str, cx: &mut Context<Self>) {
         let expanded = self.collapsed.remove(project);
         if !expanded {

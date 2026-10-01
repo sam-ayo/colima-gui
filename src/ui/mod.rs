@@ -6,6 +6,7 @@ pub mod logs_view;
 pub mod native;
 pub mod sidebar;
 pub mod stats_view;
+pub mod status_menu;
 
 use std::sync::Arc;
 use std::time::Duration;

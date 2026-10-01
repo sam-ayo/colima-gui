@@ -1,5 +1,6 @@
 #!/bin/bash
-# Makes assets/icon/colima-gui.icns from assets/icon/colima-gui.svg.
+# Makes assets/icon/colima-gui.icns from assets/icon/colima-gui.svg, and
+# the menu bar icon assets/icon/menu-bar.png from assets/icon/menu-bar.svg.
 # Run it again after a change to the SVG, and commit both files.
 #
 # Usage: scripts/icon.sh
@@ -20,3 +21,7 @@ done
 iconutil -c icns "$set" -o "$root/assets/icon/colima-gui.icns"
 rm -rf "$(dirname "$set")"
 echo "icon: $root/assets/icon/colima-gui.icns"
+
+# The status item shows 18 pt. The PNG has the 2x pixels.
+rsvg-convert -w 36 -h 36 "$root/assets/icon/menu-bar.svg" -o "$root/assets/icon/menu-bar.png"
+echo "icon: $root/assets/icon/menu-bar.png"

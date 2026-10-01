@@ -19,6 +19,7 @@ use crate::state::stats_store::StatsStore;
 use crate::ui::container_detail::{ContainerDetail, DetailEvent};
 use crate::ui::container_list::{ContainerList, ListEvent};
 use crate::ui::sidebar::{Section, Sidebar};
+use crate::ui::status_menu::{StatusMenu, StatusMenuEvent};
 use crate::ui::{
     NATIVE_BUTTON_HEIGHT, native, native::MenuEntry, text,
     ENTER_DURATION, SIDEBAR_INSET, SIDEBAR_WIDTH, TOOLBAR_HEIGHT, delayed_reveal, drag_area, spinner,
@@ -132,6 +133,7 @@ pub struct AppView {
     /// Each change gets a new animation id, so the main area fades one time.
     engine_status: EngineStatus,
     engine_changes: usize,
+    _status_menu: Entity<StatusMenu>,
     _subs: Vec<Subscription>,
     _detail_sub: Option<Subscription>,
 }
@@ -142,6 +144,8 @@ impl AppView {
         let stats = cx.new(|_| StatsStore::new());
         let machines = cx.new(MachineStore::new);
         let list = cx.new(|cx| ContainerList::new(store.clone(), stats.clone(), window, cx));
+        let handle = window.window_handle();
+        let status_menu = cx.new(|cx| StatusMenu::new(store.clone(), handle, cx));
         let subs = vec![
             // Follow the system when it changes between light and dark mode.
             cx.observe_window_appearance(window, |_, window, cx| {
@@ -188,6 +192,14 @@ impl AppView {
                     cx.notify();
                 }
             }),
+            cx.subscribe_in(&status_menu, window, |this, _, ev: &StatusMenuEvent, window, cx| match ev {
+                StatusMenuEvent::Reveal(id) => {
+                    this.section = Section::Containers;
+                    this.list.update(cx, |l, cx| l.reveal(id, cx));
+                    this.list.focus_handle(cx).focus(window, cx);
+                    cx.notify();
+                }
+            }),
             cx.subscribe_in(&list, window, |this, _, ev: &ListEvent, window, cx| match ev {
                 ListEvent::Selected { id: Some(id), pointer } => {
                     this.open_detail(id.clone(), *pointer, window, cx)
@@ -217,6 +229,7 @@ impl AppView {
             detail_width: None,
             engine_status: EngineStatus::Connecting,
             engine_changes: 0,
+            _status_menu: status_menu,
             _subs: subs,
             _detail_sub: None,
         }
