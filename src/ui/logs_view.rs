@@ -118,22 +118,41 @@ impl LogsView {
         let heading = day.filter(|d| ix == 0 || prev_day.is_some_and(|p| p != *d));
 
         // Very long lines are cut for display, so text layout stays fast.
-        let (text, spans) = if line.text.len() > MAX_DISPLAY_CHARS {
+        let cut = (line.text.len() > MAX_DISPLAY_CHARS).then(|| {
             let mut end = MAX_DISPLAY_CHARS;
             while !line.text.is_char_boundary(end) {
                 end -= 1;
             }
-            let spans = line
-                .spans
-                .iter()
-                .filter(|(r, _)| r.start < end)
-                .map(|(r, p)| (r.start..r.end.min(end), *p))
-                .collect();
-            (SharedString::from(format!("{} …", &line.text[..end])), spans)
-        } else {
-            (SharedString::from(line.text.clone()), line.spans.clone())
+            end
+        });
+        let end = cut.unwrap_or(line.text.len());
+        let clip = |r: &Range<usize>| (r.start < end).then(|| r.start..r.end.min(end));
+        let text = match cut {
+            Some(end) => SharedString::from(format!("{} …", &line.text[..end])),
+            None => SharedString::from(line.text.clone()),
         };
-        let painted = spans.into_iter().map(|(r, p)| (r, paint_style(p, cx)));
+        // A link that the cut shortens still opens the full URL.
+        let links: Vec<_> = line
+            .links
+            .iter()
+            .filter_map(|r| Some((clip(r)?, SharedString::from(line.text[r.clone()].to_string()))))
+            .collect();
+        let painted = line
+            .spans
+            .iter()
+            .filter_map(|(r, p)| Some((clip(r)?, paint_style(*p, cx))));
+        let underlines = links.iter().map(|(r, _)| {
+            let style = HighlightStyle {
+                underline: Some(UnderlineStyle {
+                    thickness: px(1.),
+                    color: None,
+                    wavy: false,
+                }),
+                ..Default::default()
+            };
+            (r.clone(), style)
+        });
+        let painted: Vec<_> = combine_highlights(painted, underlines).collect();
         let matches = filter_ranges(&text, buffer.filter()).into_iter().map(|r| {
             let style = HighlightStyle {
                 background_color: Some(t.yellow.opacity(0.35)),
@@ -182,7 +201,7 @@ impl LogsView {
             .hover(|s| s.bg(t.list_hover))
             .child(time)
             .child(
-                styled_line(text, highlights)
+                styled_line(ix, text, highlights, links)
                     .when(quiet, |d| d.text_color(t.muted_foreground)),
             );
 
@@ -242,6 +261,10 @@ fn paint_style(paint: Paint, cx: &App) -> HighlightStyle {
     match paint {
         Paint::Key => HighlightStyle {
             color: Some(t.muted_foreground),
+            ..Default::default()
+        },
+        Paint::Link => HighlightStyle {
+            color: Some(t.link),
             ..Default::default()
         },
         Paint::Level(level) => HighlightStyle {
@@ -334,19 +357,22 @@ fn filter_ranges(text: &str, filter: &str) -> Vec<Range<usize>> {
 
 /// A line of monospace text with highlights, which wraps in the space it
 /// gets. The wrapped rows start at the indent of the first row, as in
-/// `code_line`.
-fn styled_line(text: SharedString, highlights: Vec<(Range<usize>, HighlightStyle)>) -> Div {
+/// `code_line`. A click on a link opens its URL.
+fn styled_line(
+    ix: usize,
+    text: SharedString,
+    highlights: Vec<(Range<usize>, HighlightStyle)>,
+    links: Vec<(Range<usize>, SharedString)>,
+) -> Div {
     let body = text.trim_start_matches([' ', '\t']);
     let indent = text.len() - body.len();
     let row = div().flex().flex_1().min_w_0().items_start();
     if indent == 0 {
-        return row.child(div().flex_1().min_w_0().child(StyledText::new(text).with_highlights(highlights)));
+        return row.child(div().flex_1().min_w_0().child(link_text(ix, text, highlights, links)));
     }
-    let shifted: Vec<_> = highlights
-        .into_iter()
-        .filter(|(r, _)| r.end > indent)
-        .map(|(r, s)| (r.start.max(indent) - indent..r.end - indent, s))
-        .collect();
+    let shift = |r: Range<usize>| (r.end > indent).then(|| r.start.max(indent) - indent..r.end - indent);
+    let highlights = highlights.into_iter().filter_map(|(r, s)| Some((shift(r)?, s))).collect();
+    let links = links.into_iter().filter_map(|(r, url)| Some((shift(r)?, url))).collect();
     row.child(
         div()
             .flex_shrink_0()
@@ -357,8 +383,26 @@ fn styled_line(text: SharedString, highlights: Vec<(Range<usize>, HighlightStyle
         div()
             .flex_1()
             .min_w_0()
-            .child(StyledText::new(body.to_string()).with_highlights(shifted)),
+            .child(link_text(ix, SharedString::from(body.to_string()), highlights, links)),
     )
+}
+
+/// Text with highlights. The ranges in `links` show a pointer and open
+/// their URL on a click.
+fn link_text(
+    ix: usize,
+    text: SharedString,
+    highlights: Vec<(Range<usize>, HighlightStyle)>,
+    links: Vec<(Range<usize>, SharedString)>,
+) -> AnyElement {
+    let styled = StyledText::new(text).with_highlights(highlights);
+    if links.is_empty() {
+        return styled.into_any_element();
+    }
+    let (ranges, urls): (Vec<_>, Vec<_>) = links.into_iter().unzip();
+    InteractiveText::new(("log-text", ix), styled)
+        .on_click(ranges, move |i, _, cx| cx.open_url(&urls[i]))
+        .into_any_element()
 }
 
 impl Render for LogsView {

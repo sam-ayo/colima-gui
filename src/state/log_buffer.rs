@@ -147,6 +147,7 @@ mod tests {
             text: text.into(),
             level: None,
             spans: Vec::new(),
+            links: Vec::new(),
         }
     }
 

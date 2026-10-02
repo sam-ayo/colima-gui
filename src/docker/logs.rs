@@ -64,6 +64,8 @@ pub enum Paint {
     Key,
     /// The word or value that gives the level of the line.
     Level(Level),
+    /// A URL.
+    Link,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -75,6 +77,8 @@ pub struct LogLine {
     pub level: Option<Level>,
     /// The painted ranges of `text`, in order and with no overlap.
     pub spans: Vec<(Range<usize>, Paint)>,
+    /// The ranges of the URLs in `text`, in order.
+    pub links: Vec<Range<usize>>,
 }
 
 pub const TAIL_LINES: usize = 1000;
@@ -152,6 +156,7 @@ pub fn parse_line(stream: LogStream, raw: &[u8]) -> LogLine {
     };
     let (text, ansi) = ansi::parse(rest);
     let found = detect_level(&text);
+    let links = url_ranges(&text);
     let mut spans: Vec<(Range<usize>, Paint)> = Vec::new();
     if ansi.is_empty() {
         // The colors of the program have priority. Paint only plain text.
@@ -159,6 +164,11 @@ pub fn parse_line(stream: LogStream, raw: &[u8]) -> LogLine {
         if let Some((level, Some(range))) = found.clone() {
             spans.retain(|(r, _)| r.end <= range.start || r.start >= range.end);
             spans.push((range, Paint::Level(level)));
+            spans.sort_by_key(|(r, _)| r.start);
+        }
+        if !links.is_empty() {
+            spans.retain(|(r, _)| links.iter().all(|l| r.end <= l.start || r.start >= l.end));
+            spans.extend(links.iter().map(|r| (r.clone(), Paint::Link)));
             spans.sort_by_key(|(r, _)| r.start);
         }
     } else {
@@ -170,6 +180,7 @@ pub fn parse_line(stream: LogStream, raw: &[u8]) -> LogLine {
         text,
         level: found.map(|(level, _)| level),
         spans,
+        links,
     }
 }
 
@@ -404,6 +415,65 @@ fn logfmt_keys(h: &str) -> Vec<Range<usize>> {
     keys
 }
 
+/// The ranges of the `http` and `https` URLs in `text`. A URL stops at a
+/// space or a quote. Punctuation at the end, and a closing bracket with no
+/// opening bracket in the URL, are not part of it.
+fn url_ranges(text: &str) -> Vec<Range<usize>> {
+    let h = head(text, 8192);
+    let b = h.as_bytes();
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(i) = h[from..].find("http").map(|i| from + i) {
+        let rest = &h[i..];
+        let scheme = if rest.starts_with("https://") {
+            8
+        } else if rest.starts_with("http://") {
+            7
+        } else {
+            from = i + 4;
+            continue;
+        };
+        let host = i + scheme;
+        from = host;
+        let at_word_start = i == 0 || !b[i - 1].is_ascii_alphanumeric();
+        let host_start = b
+            .get(host)
+            .is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'[' || !c.is_ascii());
+        if !at_word_start || !host_start {
+            continue;
+        }
+        let mut end = host;
+        while end < b.len() && !is_url_stop(b[end]) {
+            end += 1;
+        }
+        while end > host {
+            let url = &b[i..end];
+            let count = |c: u8| url.iter().filter(|x| **x == c).count();
+            let trim = match b[end - 1] {
+                b'.' | b',' | b';' | b':' | b'!' | b'?' | b'\'' => true,
+                b')' => count(b'(') < count(b')'),
+                b']' => count(b'[') < count(b']'),
+                _ => false,
+            };
+            if !trim {
+                break;
+            }
+            end -= 1;
+        }
+        if end > host {
+            out.push(i..end);
+        }
+        from = end;
+    }
+    out
+}
+
+fn is_url_stop(c: u8) -> bool {
+    c.is_ascii_whitespace()
+        || c.is_ascii_control()
+        || matches!(c, b'"' | b'<' | b'>' | b'`' | b'\\' | b'{' | b'}' | b'|' | b'^')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -476,6 +546,33 @@ mod tests {
             ]
         );
         let l = parse_line(LogStream::Stdout, b"see https://x.io/?a=b now");
-        assert!(l.spans.is_empty());
+        assert_eq!(l.spans, [(4..21, Paint::Link)]);
+    }
+
+    fn urls(text: &str) -> Vec<&str> {
+        url_ranges(text).into_iter().map(|r| &text[r]).collect()
+    }
+
+    #[test]
+    fn finds_urls() {
+        assert_eq!(urls("Server listening at http://127.0.0.1:3001."), ["http://127.0.0.1:3001"]);
+        assert_eq!(urls("(see https://a.io/x_(y)), and http://b.io/?q=1&r=2;"), [
+            "https://a.io/x_(y)",
+            "http://b.io/?q=1&r=2",
+        ]);
+        assert_eq!(urls(r#"{"url":"https://a.io/p","next":"http://[::1]:80/"}"#), [
+            "https://a.io/p",
+            "http://[::1]:80/",
+        ]);
+        assert_eq!(urls("[https://a.io/b] <http://c.io>"), ["https://a.io/b", "http://c.io"]);
+        assert_eq!(urls("https://日本.jp/パス ok"), ["https://日本.jp/パス"]);
+        assert!(urls("xhttp://a.io http:// https://. httpd").is_empty());
+    }
+
+    #[test]
+    fn links_keep_ansi_colors() {
+        let l = parse_line(LogStream::Stdout, b"\x1b[36mhttp://a.io\x1b[0m");
+        assert_eq!(l.links, [0..11]);
+        assert!(matches!(l.spans[..], [(_, Paint::Ansi(_))]));
     }
 }
