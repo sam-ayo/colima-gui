@@ -20,6 +20,7 @@ use crate::state::volume_store::VolumeStore;
 use crate::ui::json_view::{self, Json};
 use crate::ui::container_detail::{card, field, list_row, loading, section, segmented_control};
 use crate::ui::{ENTER_DURATION, NATIVE_BUTTON_HEIGHT, TOOLBAR_HEIGHT, drag_area, native, tabular_nums, text, toast};
+use crate::ui::toast::Toast;
 
 const FILE_ROW_HEIGHT: f32 = 30.;
 
@@ -211,6 +212,52 @@ impl VolumeDetail {
         self.files_scroll.scroll_to_item(0, ScrollStrategy::Top);
         self.load_files(cx);
         cx.notify();
+    }
+
+    /// Copies a file of the current folder to a temporary folder on the Mac,
+    /// then opens the copy in the default app. The copy is a snapshot, so a
+    /// change to it does not go back to the volume. If no app can open the
+    /// file, Finder shows the copy, so the user can choose an app.
+    fn open_file(&mut self, entry: &Entry, cx: &mut Context<Self>) {
+        let name = entry.name.clone();
+        if name == "." || name == ".." || name.contains('/') {
+            return;
+        }
+        if entry.size > colima::MAX_COPY_SIZE {
+            toast::show(
+                Toast::error(format!("{name} is too large to open"))
+                    .description(format!("The limit is {}.", format_bytes(colima::MAX_COPY_SIZE))),
+                cx,
+            );
+            return;
+        }
+        let profile = self.containers.read(cx).profile().map(str::to_string);
+        let (Some(profile), Some(folder)) = (profile, self.folder_path(cx)) else { return };
+        let path = format!("{folder}/{name}");
+        let mut dest = std::env::temp_dir().join("colima-gui").join("volumes").join(&self.name);
+        dest.extend(&self.folder);
+        dest.push(&name);
+        let rx = Backend::global(cx).spawn({
+            let dest = dest.clone();
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    colima::copy_file(&profile, &path, &dest)?;
+                    colima::open_file(&dest)
+                })
+                .await
+                .map_err(anyhow::Error::from)
+                .and_then(|r| r)
+            }
+        });
+        cx.spawn(async move |_, cx| {
+            let result = rx.await;
+            let _ = cx.update(|cx| match result {
+                Ok(Ok(true)) | Err(_) => {}
+                Ok(Ok(false)) => cx.reveal_path(&dest),
+                Ok(Err(e)) => toast::show(Toast::error(e.to_string()), cx),
+            });
+        })
+        .detach();
     }
 
     /// The containers that use the volume: the ID, the name, and the state.
@@ -476,7 +523,9 @@ impl VolumeDetail {
             EntryKind::Link => IconName::FileSymlink,
             EntryKind::File | EntryKind::Other => IconName::File,
         };
+        let file = entry.kind == EntryKind::File;
         let name = entry.name.clone();
+        let clicked = entry.clone();
         let row = h_flex()
             .id(("entry", ix))
             .w_full()
@@ -487,11 +536,6 @@ impl VolumeDetail {
             .text_size(px(text::BODY))
             .child(Icon::new(icon).small().text_color(if folder { native::accent(cx) } else { t.muted_foreground }))
             .child(div().flex_1().min_w_0().truncate().child(entry.name.clone()))
-            // A long name truncates, so the tooltip shows all of it.
-            .tooltip({
-                let name = entry.name.clone();
-                move |window, cx| gpui_component::tooltip::Tooltip::new(name.clone()).build(window, cx)
-            })
             .child(
                 div()
                     .w(px(72.))
@@ -516,6 +560,11 @@ impl VolumeDetail {
                 d.cursor_pointer()
                     .hover(|s| s.bg(native::hover(cx)))
                     .on_click(cx.listener(move |this, _, _, cx| this.open_folder(Some(name.clone()), cx)))
+            })
+            .when(file, |d| {
+                d.cursor_pointer()
+                    .hover(|s| s.bg(native::hover(cx)))
+                    .on_click(cx.listener(move |this, _, _, cx| this.open_file(&clicked, cx)))
             });
         // A row of a uniform list gets the width of its content, so the
         // wrapper sets the width of the pane.

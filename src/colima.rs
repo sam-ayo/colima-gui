@@ -242,6 +242,45 @@ pub fn list_folder(profile: &str, path: &str) -> Result<Vec<Entry>> {
     Ok(parse_entries(&out.stdout))
 }
 
+/// The largest file that `copy_file` copies. A larger file goes through
+/// SSH slowly, and the user can use `colima ssh` for it.
+pub const MAX_COPY_SIZE: u64 = 100 * 1024 * 1024;
+
+/// Copies a file from the VM of a profile to `dest` on the Mac. Root owns
+/// the Docker data, so the call uses `sudo cat`.
+pub fn copy_file(profile: &str, path: &str, dest: &std::path::Path) -> Result<()> {
+    if let Some(dir) = dest.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let file = std::fs::File::create(dest)?;
+    let out = colima()
+        .args(["ssh", "--profile", profile, "--", "sudo", "cat", path])
+        .stdout(file)
+        .output()
+        .context("could not run `colima`. Make sure that it is on the PATH")?;
+    if !out.status.success() {
+        let _ = std::fs::remove_file(dest);
+        let err = String::from_utf8_lossy(&out.stderr);
+        let last = err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("");
+        bail!("could not copy the file: {}", last.trim_start_matches("cat: "));
+    }
+    Ok(())
+}
+
+/// Opens a file on the Mac in its default app. Returns `false` if no app
+/// can open the file type.
+pub fn open_file(path: &std::path::Path) -> Result<bool> {
+    let out = Command::new("open").arg(path).output().context("could not run `open`")?;
+    if out.status.success() {
+        return Ok(true);
+    }
+    let err = String::from_utf8_lossy(&out.stderr);
+    if err.contains("kLSApplicationNotFoundErr") || err.contains("No application knows how to open") {
+        return Ok(false);
+    }
+    bail!("could not open the file: {}", err.trim());
+}
+
 /// Reads the output of `find -printf '%y\t%s\t%T@\t%f\0'`. The name is the
 /// last field, so a tab in a name does not break the line.
 fn parse_entries(out: &[u8]) -> Vec<Entry> {
