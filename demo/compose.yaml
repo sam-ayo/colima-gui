@@ -1,0 +1,85 @@
+# Sample data for a demo of Colima GUI: a small web shop. It fills the
+# Containers, Images, and Volumes sections with realistic rows, logs with
+# levels and colors, a failed container, and volumes that contain files.
+#
+# Start and stop it with scripts/demo.sh. Do not use it in production.
+
+name: storefront
+
+services:
+  web:
+    image: nginx:1.27-alpine
+    ports:
+      - "8080:80"
+    volumes:
+      - ./site:/usr/share/nginx/html:ro
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  api:
+    image: busybox:1.36
+    command: ["sh", "/demo/api.sh"]
+    environment:
+      DATABASE_URL: postgres://shop:shop@db:5432/shop
+      REDIS_URL: redis://cache:6379/0
+      PORT: "3000"
+    volumes:
+      - ./bin:/demo:ro
+      - uploads:/srv/uploads
+    depends_on:
+      - db
+      - cache
+    restart: unless-stopped
+
+  worker:
+    image: busybox:1.36
+    command: ["sh", "/demo/worker.sh"]
+    environment:
+      QUEUE: emails,thumbnails
+      CONCURRENCY: "4"
+    volumes:
+      - ./bin:/demo:ro
+      - uploads:/srv/uploads
+    depends_on:
+      - cache
+    restart: unless-stopped
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: shop
+      POSTGRES_PASSWORD: shop
+      POSTGRES_DB: shop
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  cache:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+
+  # A job that fails, so the list shows a failed member in the group.
+  migrate:
+    image: busybox:1.36
+    command: ["sh", "/demo/migrate.sh"]
+    volumes:
+      - ./bin:/demo:ro
+    depends_on:
+      - db
+
+  # Puts sample files in the uploads volume, then exits with code 0.
+  seed:
+    image: busybox:1.36
+    command: ["sh", "/demo/seed.sh"]
+    volumes:
+      - ./bin:/demo:ro
+      - uploads:/srv/uploads
+
+volumes:
+  pgdata:
+  redis-data:
+  uploads:
