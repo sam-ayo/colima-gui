@@ -26,6 +26,9 @@
 #
 # The message of an annotated tag becomes the release notes, which the
 # update alert shows.
+#
+# The tag sets the version. The build writes it into Cargo.toml before it
+# compiles, so Cargo.toml in the repository does not need a change.
 
 name: Release
 
@@ -64,14 +67,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Check the version
+      - name: Set the version from the tag
         if: github.ref_type == 'tag'
-        run: |
-          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
-          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
-            echo "The tag $GITHUB_REF_NAME does not agree with version $version in Cargo.toml." >&2
-            exit 1
-          fi
+        run: scripts/set-version.sh "${GITHUB_REF_NAME#v}"
 
       - name: Install the Rust target
         run: rustup target add ${{ matrix.rust_target }}
@@ -157,6 +155,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+
+      # The sign script reads the version from Cargo.toml.
+      - name: Set the version from the tag
+        if: github.ref_type == 'tag'
+        run: scripts/set-version.sh "${GITHUB_REF_NAME#v}"
 
       - name: Get the release notes
         if: github.ref_type == 'tag'
