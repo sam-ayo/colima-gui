@@ -476,9 +476,10 @@ pub(super) fn segmented_control(
 ) -> impl IntoElement + use<> {
     let t = cx.theme();
     let dark = t.is_dark();
-    let track = if dark { white().opacity(0.06) } else { black().opacity(0.06) };
-    let selected_bg = if dark { white().opacity(0.22) } else { white() };
-    let selected_border = if dark { white().opacity(0.12) } else { black().opacity(0.1) };
+    let overlay = native::overlay(cx);
+    let track = overlay.opacity(0.06);
+    let selected_bg = if dark { overlay.opacity(0.22) } else { native::paper(cx) };
+    let selected_border = overlay.opacity(if dark { 0.12 } else { 0.1 });
     let hover_bg = native::control_hover(cx);
     let fg = t.foreground;
     let muted = t.muted_foreground;

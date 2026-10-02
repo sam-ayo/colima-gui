@@ -141,7 +141,7 @@ impl RenderOnce for ContainerIcon {
             .map(|d| match logo {
                 // A white tile for all themes, because the logos are made
                 // for a light background.
-                Some(logo) => d.bg(gpui::white()).child(
+                Some(logo) => d.bg(crate::ui::native::paper(cx)).child(
                     img(logo)
                         .size(self.size * 0.8)
                         .object_fit(ObjectFit::Contain)

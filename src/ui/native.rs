@@ -107,6 +107,10 @@ pub fn sync_theme(window: &mut Window, cx: &mut App) {
         return;
     };
     let s = Surfaces::new(c.accent, dark);
+    // The system separator is pure black or pure white with an alpha. Keep
+    // its alpha, but use the tinted base, as the other fills do.
+    let over = if dark { s.paper } else { s.ink };
+    let separator = over.opacity(c.separator.a);
     Theme::update(cx, |t| {
         // The components size their text in rems, and most of them use
         // `text_sm`, which is 0.875 rem. This rem size makes that text 13 pt,
@@ -124,8 +128,13 @@ pub fn sync_theme(window: &mut Window, cx: &mut App) {
         t.popover = s.popover;
         t.foreground = c.label;
         t.muted_foreground = c.secondary_label;
-        t.border = c.separator;
-        t.input = c.separator;
+        t.border = separator;
+        t.input = separator;
+        // The hover fill of the ghost buttons and the menu items. A ghost
+        // button halves it in the dark appearance, so the result is the
+        // same as `control_hover`.
+        t.accent = over.opacity(if dark { 0.16 } else { 0.05 });
+        t.accent_foreground = c.label;
         t.ring = c.accent;
         t.caret = c.accent;
         t.selection = c.text_selection;
@@ -154,6 +163,8 @@ pub fn sync_theme(window: &mut Window, cx: &mut App) {
         accent: c.accent,
         selection: c.selection,
         unemphasized_selection: s.selection,
+        paper: s.paper,
+        ink: s.ink,
     });
 }
 
@@ -168,11 +179,17 @@ struct Surfaces {
     popover: Hsla,
     /// The fill of a selected row when the list has no focus.
     selection: Hsla,
+    /// A near-white with the accent tint, for all themes.
+    paper: Hsla,
+    /// A near-black with the accent tint, for all themes.
+    ink: Hsla,
 }
 
 impl Surfaces {
     fn new(accent: Hsla, dark: bool) -> Self {
         let tint = |s: f32, l: f32| hsla(accent.h, s * accent.s.min(1.), l, 1.);
+        let paper = tint(0.45, 0.99);
+        let ink = tint(0.40, 0.12);
         if dark {
             Surfaces {
                 background: tint(0.14, 0.135),
@@ -181,6 +198,8 @@ impl Surfaces {
                 muted: tint(0.14, 0.22),
                 popover: tint(0.14, 0.17),
                 selection: tint(0.20, 0.25),
+                paper,
+                ink,
             }
         } else {
             Surfaces {
@@ -190,6 +209,8 @@ impl Surfaces {
                 muted: tint(0.26, 0.915),
                 popover: tint(0.30, 0.985),
                 selection: tint(0.30, 0.87),
+                paper,
+                ink,
             }
         }
     }
@@ -203,6 +224,8 @@ pub struct SystemAccent {
     pub selection: Hsla,
     /// The fill of a selected row when the list or the window has no focus.
     pub unemphasized_selection: Hsla,
+    pub paper: Hsla,
+    pub ink: Hsla,
 }
 
 impl Global for SystemAccent {}
@@ -234,14 +257,28 @@ pub fn hover(cx: &App) -> Hsla {
     selection(false, cx).opacity(0.5)
 }
 
+/// A near-white with a small tint of the accent hue. Pure white looks
+/// flat, so the app uses this color for its white fills.
+pub fn paper(cx: &App) -> Hsla {
+    cx.try_global::<SystemAccent>().map(|a| a.paper).unwrap_or_else(white)
+}
+
+/// The base color of a translucent fill on a surface: `paper` in the dark
+/// appearance and a near-black with the accent tint in the light
+/// appearance. Pure black looks flat, so the app does not use it.
+pub fn overlay(cx: &App) -> Hsla {
+    if gpui_component::ActiveTheme::theme(cx).is_dark() {
+        paper(cx)
+    } else {
+        cx.try_global::<SystemAccent>().map(|a| a.ink).unwrap_or_else(black)
+    }
+}
+
 /// The fill of a toolbar control under the pointer. The detail tabs and the
 /// toolbar buttons use it, so the two hover states look the same.
 pub fn control_hover(cx: &App) -> Hsla {
-    if gpui_component::ActiveTheme::theme(cx).is_dark() {
-        white().opacity(0.08)
-    } else {
-        black().opacity(0.05)
-    }
+    let dark = gpui_component::ActiveTheme::theme(cx).is_dark();
+    overlay(cx).opacity(if dark { 0.08 } else { 0.05 })
 }
 
 /// The style of an icon button in a toolbar. The ghost style of the
@@ -249,7 +286,7 @@ pub fn control_hover(cx: &App) -> Hsla {
 /// so this style uses the hover fill of the detail tabs.
 pub fn toolbar_button(cx: &App) -> gpui_component::button::ButtonCustomVariant {
     let t = gpui_component::ActiveTheme::theme(cx);
-    let active = if t.is_dark() { white().opacity(0.14) } else { black().opacity(0.1) };
+    let active = overlay(cx).opacity(if t.is_dark() { 0.14 } else { 0.1 });
     gpui_component::button::ButtonCustomVariant::new(cx)
         .color(transparent_black())
         .foreground(t.secondary_foreground)
