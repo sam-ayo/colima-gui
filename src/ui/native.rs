@@ -38,11 +38,11 @@ pub const APP_NAME: &str = "Colima GUI";
 #[derive(Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 pub enum AccentColor {
     System,
-    #[default]
     Purple,
     Pink,
     Orange,
     Green,
+    #[default]
     Teal,
     Blue,
 }
