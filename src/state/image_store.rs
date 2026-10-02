@@ -172,6 +172,9 @@ pub struct Pull {
     task: Task<()>,
 }
 
+/// The rows and the references of one engine.
+type SavedImages = (IndexMap<String, ImageRow>, HashMap<String, String>);
+
 pub struct ImageStore {
     containers: Entity<ContainerStore>,
     /// The socket of the engine that the rows come from.
@@ -189,6 +192,12 @@ pub struct ImageStore {
     active: bool,
     /// True when the rows are from the current engine.
     loaded: bool,
+    /// True after a list load from the current connection starts. Saved
+    /// rows are not fresh.
+    fresh: bool,
+    /// The last rows and references of each engine. A switch shows them
+    /// at once.
+    saved: HashMap<String, SavedImages>,
     /// The pulls that ended. The store tells about them when the next
     /// list arrives, so the list can select the image.
     pulled: Vec<String>,
@@ -209,7 +218,7 @@ impl ImageStore {
                     this.reload(cx);
                 }
             }
-            StoreEvent::VolumesChanged | StoreEvent::Error(_) => {}
+            StoreEvent::VolumesChanged | StoreEvent::NetworksChanged | StoreEvent::Error(_) => {}
         })];
         ImageStore {
             containers,
@@ -221,6 +230,8 @@ impl ImageStore {
             pulls: IndexMap::new(),
             active: false,
             loaded: false,
+            fresh: false,
+            saved: HashMap::new(),
             pulled: Vec::new(),
             list_gen: 0,
             _subs: subs,
@@ -246,32 +257,45 @@ impl ImageStore {
         }
     }
 
-    /// Drops the rows of an old engine, and loads the rows of a new one.
+    /// Saves the rows of an old engine, and shows the saved rows of a new
+    /// one. Loads the rows when the new engine connects.
     fn sync_engine(&mut self, cx: &mut Context<Self>) {
         let store = self.containers.read(cx);
-        let socket = (store.status == EngineStatus::Connected)
+        let connected = store.status == EngineStatus::Connected;
+        let socket = (store.shown_status() == EngineStatus::Connected)
             .then(|| store.socket().map(str::to_string))
             .flatten();
-        if socket == self.socket {
-            return;
+        if socket != self.socket {
+            let rows = std::mem::take(&mut self.rows);
+            let refs = std::mem::take(&mut self.refs);
+            if self.loaded
+                && let Some(old) = self.socket.take()
+            {
+                self.saved.insert(old, (rows, refs));
+            }
+            self.socket = socket;
+            self.list_gen += 1;
+            self.removing.clear();
+            self.pulls.clear();
+            self.pulled.clear();
+            self.pruning = false;
+            self.loaded = false;
+            self.fresh = false;
+            if let Some((rows, refs)) = self.socket.as_ref().and_then(|s| self.saved.get(s)) {
+                self.rows = rows.clone();
+                self.refs = refs.clone();
+                self.loaded = true;
+            }
+            cx.notify();
         }
-        self.socket = socket;
-        self.list_gen += 1;
-        self.rows.clear();
-        self.refs.clear();
-        self.removing.clear();
-        self.pulls.clear();
-        self.pulled.clear();
-        self.pruning = false;
-        self.loaded = false;
-        if self.active && self.socket.is_some() {
+        if connected && self.active && !self.fresh && self.socket.is_some() {
             self.reload(cx);
         }
-        cx.notify();
     }
 
     pub fn reload(&mut self, cx: &mut Context<Self>) {
         let Some(docker) = self.containers.read(cx).docker().cloned() else { return };
+        self.fresh = true;
         self.list_gen += 1;
         let generation = self.list_gen;
         let rx = Backend::global(cx).spawn(async move { images::list_all(&docker).await });
@@ -466,6 +490,7 @@ mod tests {
             created: 0,
             finished_at: None,
             volumes: Vec::new(),
+            networks: Vec::new(),
         }
     }
 

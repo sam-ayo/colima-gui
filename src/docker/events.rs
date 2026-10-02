@@ -17,6 +17,9 @@ pub enum EngineEvent {
     Volume,
     /// An image was pulled, tagged, untagged, or deleted.
     Image,
+    /// A network was created, deleted, or pruned, or a container joined or
+    /// left a network.
+    Network,
     /// The stream (re)connected. The store must reload the full list.
     Resync,
     /// The engine does not answer. The stream tries again with backoff.
@@ -38,7 +41,7 @@ impl EngineEvent {
 const MIN_BACKOFF: Duration = Duration::from_millis(500);
 const MAX_BACKOFF: Duration = Duration::from_secs(2);
 
-/// Reads container, volume, and image events until `tx` closes. If the stream ends, it connects
+/// Reads container, volume, image, and network events until `tx` closes. If the stream ends, it connects
 /// again with backoff (0.5 s to 2 s) and sends `Resync`.
 pub async fn pump(docker: Docker, tx: async_channel::Sender<EngineEvent>) {
     let mut backoff = MIN_BACKOFF;
@@ -71,7 +74,12 @@ pub async fn pump(docker: Docker, tx: async_channel::Sender<EngineEvent>) {
             since: Some(since.to_string()),
             filters: Some(HashMap::from([(
                 "type".to_string(),
-                vec!["container".to_string(), "volume".to_string(), "image".to_string()],
+                vec![
+                    "container".to_string(),
+                    "volume".to_string(),
+                    "image".to_string(),
+                    "network".to_string(),
+                ],
             )])),
             ..Default::default()
         };
@@ -94,6 +102,24 @@ pub async fn pump(docker: Docker, tx: async_channel::Sender<EngineEvent>) {
                 // A push or a save does not change the list.
                 if !matches!(action.as_str(), "push" | "save")
                     && tx.send(EngineEvent::Image).await.is_err()
+                {
+                    return;
+                }
+                continue;
+            }
+            if msg.typ == Some(EventMessageTypeEnum::NETWORK) {
+                if tx.send(EngineEvent::Network).await.is_err() {
+                    return;
+                }
+                // A connect or a disconnect changes the networks of the
+                // container, and the container itself sends no event.
+                let container = msg
+                    .actor
+                    .and_then(|a| a.attributes)
+                    .and_then(|mut a| a.remove("container"))
+                    .filter(|_| matches!(action.as_str(), "connect" | "disconnect"));
+                if let Some(id) = container
+                    && tx.send(EngineEvent::Container { id, action }).await.is_err()
                 {
                     return;
                 }

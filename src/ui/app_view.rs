@@ -1,5 +1,5 @@
-//! The root view: the sidebar, the container, volume, or image list, and
-//! the detail pane.
+//! The root view: the sidebar, the container, volume, image, or network
+//! list, and the detail pane.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -16,6 +16,7 @@ use crate::docker::EngineStatus;
 use crate::state::container_store::{ContainerStore, StoreEvent};
 use crate::state::image_store::{ImageEvent, ImageStore};
 use crate::state::machine_store::{MachineEvent, MachineStore};
+use crate::state::network_store::{NetworkEvent, NetworkStore};
 use crate::state::stats_store::StatsStore;
 use crate::state::volume_store::{VolumeEvent, VolumeStore};
 use crate::ui::container_detail::{ContainerDetail, DetailEvent};
@@ -23,6 +24,8 @@ use crate::ui::container_list::{ContainerList, ListEvent};
 use crate::ui::image_detail::{ImageDetail, ImageDetailEvent};
 use crate::ui::image_list::{ImageList, ImageListEvent};
 use crate::ui::key_nav::{self, Move};
+use crate::ui::network_detail::{NetworkDetail, NetworkDetailEvent};
+use crate::ui::network_list::{NetworkList, NetworkListEvent};
 use crate::ui::sidebar::{Section, Sidebar};
 use crate::ui::toast::{Toast, Toaster};
 use crate::ui::status_menu::{StatusMenu, StatusMenuEvent};
@@ -163,9 +166,12 @@ pub struct AppView {
     volume_list: Entity<VolumeList>,
     images: Entity<ImageStore>,
     image_list: Entity<ImageList>,
+    networks: Entity<NetworkStore>,
+    network_list: Entity<NetworkList>,
     detail: Option<Entity<ContainerDetail>>,
     volume_detail: Option<Entity<VolumeDetail>>,
     image_detail: Option<Entity<ImageDetail>>,
+    network_detail: Option<Entity<NetworkDetail>>,
     /// The detail pane that goes out after a click on its close button.
     /// It stays until the spring closes it.
     closing_detail: Option<AnyView>,
@@ -211,9 +217,12 @@ pub struct AppView {
     /// first resize, and the pane then uses a part of the main area. A
     /// narrow main area can show the pane narrower.
     detail_width: Option<Pixels>,
-    /// The engine status at the last change, and the number of changes.
-    /// Each change gets a new animation id, so the main area fades one time.
+    /// The engine status at the last change.
     engine_status: EngineStatus,
+    /// The status that the main area showed at the last change, and the
+    /// number of changes. Each change gets a new animation id, so the main
+    /// area fades one time.
+    shown_status: EngineStatus,
     engine_changes: usize,
     _status_menu: Entity<StatusMenu>,
     toaster: Entity<Toaster>,
@@ -225,6 +234,7 @@ pub struct AppView {
     _detail_sub: Option<Subscription>,
     _volume_detail_sub: Option<Subscription>,
     _image_detail_sub: Option<Subscription>,
+    _network_detail_sub: Option<Subscription>,
 }
 
 impl AppView {
@@ -237,6 +247,8 @@ impl AppView {
         let volume_list = cx.new(|cx| VolumeList::new(volumes.clone(), store.clone(), window, cx));
         let images = cx.new(|cx| ImageStore::new(store.clone(), cx));
         let image_list = cx.new(|cx| ImageList::new(images.clone(), store.clone(), window, cx));
+        let networks = cx.new(|cx| NetworkStore::new(store.clone(), cx));
+        let network_list = cx.new(|cx| NetworkList::new(networks.clone(), store.clone(), window, cx));
         let handle = window.window_handle();
         let status_menu = cx.new(|cx| StatusMenu::new(store.clone(), handle, cx));
         let subs = vec![
@@ -254,7 +266,19 @@ impl AppView {
                 }
                 cx.notify();
             }),
-            cx.observe(&machines, |_, _, cx| cx.notify()),
+            cx.observe(&machines, |this, machines, cx| {
+                // Load the rows of the other running machines, so a switch
+                // to them shows rows at once.
+                let sockets = machines
+                    .read(cx)
+                    .machines
+                    .iter()
+                    .filter(|m| m.is_running())
+                    .map(|m| crate::docker::profile_socket(&m.name))
+                    .collect();
+                this.store.update(cx, |s, cx| s.prefetch(sockets, cx));
+                cx.notify();
+            }),
             cx.observe_global::<quit::Quitting>(|_, cx| cx.notify()),
             cx.subscribe_in(&machines, window, |this, _, ev: &MachineEvent, _, cx| match ev {
                 MachineEvent::Error(msg) => {
@@ -270,18 +294,25 @@ impl AppView {
                 StoreEvent::Error(msg) => {
                     toast::show(Toast::error(msg.clone()), cx)
                 }
-                StoreEvent::VolumesChanged | StoreEvent::ImagesChanged => {}
+                StoreEvent::VolumesChanged | StoreEvent::ImagesChanged | StoreEvent::NetworksChanged => {}
                 StoreEvent::Changed => {
                     let status = this.store.read(cx).status.clone();
+                    let shown = this.store.read(cx).shown_status();
                     // Close the detail pane when the engine goes away.
                     if status != EngineStatus::Connected {
                         this.close_pane(Section::Containers, false, cx);
                         this.close_pane(Section::Volumes, false, cx);
                         this.close_pane(Section::Images, false, cx);
+                        this.close_pane(Section::Networks, false, cx);
+                    }
+                    // A switch between two engines that both show rows does
+                    // not fade the main area.
+                    if std::mem::discriminant(&shown) != std::mem::discriminant(&this.shown_status) {
+                        this.shown_status = shown;
+                        this.engine_changes += 1;
                     }
                     if std::mem::discriminant(&status) != std::mem::discriminant(&this.engine_status) {
                         this.engine_status = status;
-                        this.engine_changes += 1;
                         // The machine list is out of date when the engine
                         // comes or goes.
                         this.machines.update(cx, |m, cx| m.refresh(cx));
@@ -320,6 +351,36 @@ impl AppView {
                 }
                 VolumeListEvent::Selected { name: None, pointer } => {
                     this.close_pane(Section::Volumes, *pointer, cx)
+                }
+            }),
+            cx.subscribe_in(&networks, window, |this, _, ev: &NetworkEvent, window, cx| match ev {
+                NetworkEvent::Created(name) => {
+                    // Select the new network only in the network list, so the
+                    // selection of a different section stays.
+                    if this.section == Section::Networks {
+                        this.network_list.update(cx, |l, cx| l.reveal(name, cx));
+                        this.network_list.focus_handle(cx).focus(window, cx);
+                    }
+                }
+                NetworkEvent::Error(msg) => {
+                    toast::show(Toast::error(msg.clone()), cx)
+                }
+                NetworkEvent::Pruned(count) => {
+                    let msg = match count {
+                        0 => "No networks were unused.".to_string(),
+                        1 => "Removed 1 network.".to_string(),
+                        n => format!("Removed {n} networks."),
+                    };
+                    toast::show(Toast::success(msg), cx)
+                }
+            }),
+            cx.subscribe_in(&network_list, window, |this, _, ev: &NetworkListEvent, window, cx| match ev {
+                NetworkListEvent::RevealContainer(id) => this.reveal_container(id, window, cx),
+                NetworkListEvent::Selected { name: Some(name), pointer } => {
+                    this.open_network_detail(name.clone(), *pointer, window, cx)
+                }
+                NetworkListEvent::Selected { name: None, pointer } => {
+                    this.close_pane(Section::Networks, *pointer, cx)
                 }
             }),
             cx.subscribe_in(&images, window, |this, _, ev: &ImageEvent, window, cx| match ev {
@@ -377,9 +438,12 @@ impl AppView {
             volume_list,
             images,
             image_list,
+            networks,
+            network_list,
             detail: None,
             volume_detail: None,
             image_detail: None,
+            network_detail: None,
             closing_detail: None,
             detail_spring: SpringState { position: 0., velocity: 0. },
             detail_stepped_at: None,
@@ -401,6 +465,7 @@ impl AppView {
             sidebar_follows_pointer: false,
             detail_width: None,
             engine_status: EngineStatus::Connecting,
+            shown_status: EngineStatus::Connecting,
             engine_changes: 0,
             _status_menu: status_menu,
             toaster: cx.new(|cx| Toaster::new(window, cx)),
@@ -409,6 +474,7 @@ impl AppView {
             _detail_sub: None,
             _volume_detail_sub: None,
             _image_detail_sub: None,
+            _network_detail_sub: None,
         }
     }
 
@@ -419,6 +485,7 @@ impl AppView {
             Section::Containers => self.list.focus_handle(cx).focus(window, cx),
             Section::Volumes => self.volume_list.focus_handle(cx).focus(window, cx),
             Section::Images => self.image_list.focus_handle(cx).focus(window, cx),
+            Section::Networks => self.network_list.focus_handle(cx).focus(window, cx),
             _ => self.focus_sidebar(window, cx),
         }
     }
@@ -448,6 +515,11 @@ impl AppView {
             }
             Section::Images => {
                 if let Some(d) = &self.image_detail {
+                    d.update(cx, |d, cx| d.focus_in(window, cx));
+                }
+            }
+            Section::Networks => {
+                if let Some(d) = &self.network_detail {
                     d.update(cx, |d, cx| d.focus_in(window, cx));
                 }
             }
@@ -510,6 +582,11 @@ impl AppView {
                     d.update(cx, |d, cx| d.cycle_tab(delta, cx));
                 }
             }
+            Section::Networks => {
+                if let Some(d) = &self.network_detail {
+                    d.update(cx, |d, cx| d.cycle_tab(delta, cx));
+                }
+            }
             _ => {}
         }
     }
@@ -533,6 +610,11 @@ impl AppView {
                     d.update(cx, |d, cx| d.set_tab_at(ix, cx));
                 }
             }
+            Section::Networks => {
+                if let Some(d) = &self.network_detail {
+                    d.update(cx, |d, cx| d.set_tab_at(ix, cx));
+                }
+            }
             _ => {}
         }
     }
@@ -545,6 +627,9 @@ impl AppView {
         }
         if section == Section::Images {
             self.images.update(cx, |i, cx| i.activate(cx));
+        }
+        if section == Section::Networks {
+            self.networks.update(cx, |n, cx| n.activate(cx));
         }
         self.focus_list(window, cx);
         if section != Section::Volumes {
@@ -565,6 +650,7 @@ impl AppView {
             Section::Containers => self.detail.clone().map(Into::into),
             Section::Volumes => self.volume_detail.clone().map(Into::into),
             Section::Images => self.image_detail.clone().map(Into::into),
+            Section::Networks => self.network_detail.clone().map(Into::into),
             _ => None,
         }
     }
@@ -671,6 +757,9 @@ impl AppView {
         }
         if self.image_list.read(cx).leading_inset() != inset {
             self.image_list.update(cx, |l, cx| l.set_leading_inset(inset, cx));
+        }
+        if self.network_list.read(cx).leading_inset() != inset {
+            self.network_list.update(cx, |l, cx| l.set_leading_inset(inset, cx));
         }
         width
     }
@@ -817,6 +906,7 @@ impl AppView {
             Section::Containers => self.list.update(cx, |l, cx| l.clear_selection(cx)),
             Section::Volumes => self.volume_list.update(cx, |l, cx| l.clear_selection(cx)),
             Section::Images => self.image_list.update(cx, |l, cx| l.clear_selection(cx)),
+            Section::Networks => self.network_list.update(cx, |l, cx| l.clear_selection(cx)),
             _ => {}
         }
     }
@@ -1041,6 +1131,10 @@ impl AppView {
                     this.set_section(Section::Images, window, cx);
                     this.image_list.update(cx, |l, cx| l.reveal(id, cx));
                 }
+                DetailEvent::RevealNetwork(name) => {
+                    this.set_section(Section::Networks, window, cx);
+                    this.network_list.update(cx, |l, cx| l.reveal(name, cx));
+                }
             }
         }));
         self.detail = Some(detail);
@@ -1069,6 +1163,13 @@ impl AppView {
             Section::Images => match self.image_detail.take() {
                 Some(d) => {
                     self._image_detail_sub = None;
+                    d.into()
+                }
+                None => return,
+            },
+            Section::Networks => match self.network_detail.take() {
+                Some(d) => {
+                    self._network_detail_sub = None;
                     d.into()
                 }
                 None => return,
@@ -1142,9 +1243,36 @@ impl AppView {
         cx.notify();
     }
 
+    fn open_network_detail(&mut self, name: String, pointer: bool, window: &mut Window, cx: &mut Context<Self>) {
+        // The pane moves as the container pane does. See `open_detail`.
+        self.closing_detail = None;
+        if let Some(width) = self.detail_restore_width.take() {
+            self.detail_width = width;
+        }
+        if !pointer {
+            self.detail_spring = SpringState { position: 1., velocity: 0. };
+        }
+        let tab = self.network_detail.as_ref().map(|d| d.read(cx).tab()).unwrap_or_default();
+        let (networks, store) = (self.networks.clone(), self.store.clone());
+        let detail = cx.new(|cx| NetworkDetail::new(name, networks, store, tab, cx));
+        self._network_detail_sub = Some(cx.subscribe_in(
+            &detail,
+            window,
+            |this, _, ev: &NetworkDetailEvent, window, cx| match ev {
+                NetworkDetailEvent::Close => this.network_list.update(cx, |l, cx| l.clear_selection(cx)),
+                NetworkDetailEvent::RevealContainer(id) => this.reveal_container(id, window, cx),
+                NetworkDetailEvent::Remove(name) => {
+                    this.network_list.update(cx, |l, cx| l.request_remove(name.clone(), window, cx))
+                }
+            },
+        ));
+        self.network_detail = Some(detail);
+        cx.notify();
+    }
+
     fn render_engine_state(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let store = self.store.read(cx);
-        let el = match &store.status {
+        let el = match &store.shown_status() {
             EngineStatus::Connected => return None,
             EngineStatus::Connecting => {
                 // A fast connection shows nothing here, not a spinner that
@@ -1301,6 +1429,7 @@ impl Render for AppView {
             let list: AnyView = match self.section {
                 Section::Volumes => self.volume_list.clone().into(),
                 Section::Images => self.image_list.clone().into(),
+                Section::Networks => self.network_list.clone().into(),
                 _ => self.list.clone().into(),
             };
             let pane = self.pane();

@@ -50,7 +50,8 @@ actions!(
 
 /// The key context of the sidebar.
 pub const SIDEBAR: &str = "Sidebar";
-/// The key context that the container, volume, and image lists add.
+/// The key context that the container, volume, image, and network lists
+/// add.
 pub const LIST: &str = "NavList";
 /// The key context of the detail panes.
 pub const DETAIL: &str = "DetailPane";

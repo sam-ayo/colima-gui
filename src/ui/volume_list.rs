@@ -270,7 +270,7 @@ impl VolumeList {
         };
         native::ask_text(request, window, cx, |this, name, window, cx| {
             let name = name.trim().to_string();
-            let problem = match crate::docker::volumes::check_name(&name) {
+            let problem = match crate::docker::check_name(&name) {
                 Err(problem) => Some(problem),
                 Ok(()) if this.store.read(cx).rows.contains_key(&name) => Some("A volume with this name exists."),
                 Ok(()) => None,

@@ -75,6 +75,9 @@ pub struct ContainerRow {
     pub finished_at: Option<i64>,
     /// The names of the volumes that the container mounts.
     pub volumes: Vec<String>,
+    /// The names of the networks of the container, sorted. A stopped
+    /// container keeps its networks.
+    pub networks: Vec<String>,
 }
 
 impl ContainerRow {
@@ -248,6 +251,15 @@ impl From<ContainerSummary> for ContainerRow {
                 .filter(|m| m.typ.as_deref() == Some("volume"))
                 .filter_map(|m| m.name.clone())
                 .collect(),
+            networks: {
+                let mut names: Vec<String> = c
+                    .network_settings
+                    .and_then(|n| n.networks)
+                    .map(|n| n.into_keys().collect())
+                    .unwrap_or_default();
+                names.sort();
+                names
+            },
         }
     }
 }
@@ -390,6 +402,9 @@ pub struct Mount {
 pub struct Details {
     pub ip: Option<String>,
     pub mounts: Vec<Mount>,
+    /// The networks of the container, sorted by name, each with the IPv4
+    /// address of the container. A stopped container has no address.
+    pub networks: Vec<(String, Option<String>)>,
     /// The full inspect data as pretty JSON.
     pub json: String,
 }
@@ -424,9 +439,19 @@ pub async fn inspect(docker: &Docker, id: &str) -> Result<Details> {
             }
         })
         .collect();
+    let mut networks: Vec<(String, Option<String>)> = info
+        .network_settings
+        .as_ref()
+        .and_then(|n| n.networks.as_ref())
+        .into_iter()
+        .flatten()
+        .map(|(name, e)| (name.clone(), e.ip_address.clone().filter(|ip| !ip.is_empty())))
+        .collect();
+    networks.sort();
     Ok(Details {
         ip,
         mounts,
+        networks,
         json: serde_json::to_string_pretty(&info)?,
     })
 }
@@ -453,6 +478,7 @@ mod tests {
             created: 0,
             finished_at: None,
             volumes: Vec::new(),
+            networks: Vec::new(),
         };
         assert_eq!(row.status_parts(), ("Running".into(), Some("2 hours".into())));
         row.state = State::Exited;
@@ -500,6 +526,7 @@ mod tests {
             created: 0,
             finished_at: Some(at),
             volumes: Vec::new(),
+            networks: Vec::new(),
         };
         let mongo = member("mongo", "Exited (2) 6 minutes ago", 47_948);
         let redis = member("redis", "Exited (0) 6 minutes ago", 48_009);

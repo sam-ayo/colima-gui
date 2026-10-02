@@ -64,11 +64,14 @@ pub enum DetailEvent {
     RevealVolume(String),
     /// Show an image in the image list. The value is the image ID.
     RevealImage(String),
+    /// Show a network in the network list.
+    RevealNetwork(String),
 }
 
 struct Loaded {
     ip: Option<String>,
     mounts: Vec<Mount>,
+    networks: Vec<(String, Option<String>)>,
     /// For each mount: `Some(true)` for a folder on the Mac, `Some(false)`
     /// for a file on the Mac, `None` for a volume or a path in the VM only.
     on_mac: Vec<Option<bool>>,
@@ -219,7 +222,7 @@ impl ContainerDetail {
             let result = rx.await;
             let _ = this.update(cx, |this, cx| {
                 this.inspect = match result {
-                    Ok(Ok(Details { ip, mounts, json })) => {
+                    Ok(Ok(Details { ip, mounts, networks, json })) => {
                         let json = Json::new(json);
                         this.sync_inspect_list(json.lines.len());
                         // Colima shares the home folder at the same path, so
@@ -231,7 +234,7 @@ impl ContainerDetail {
                                 meta.map(|meta| meta.is_dir())
                             })
                             .collect();
-                        Inspect::Loaded(Rc::new(Loaded { ip, mounts, on_mac, json: Rc::new(json) }))
+                        Inspect::Loaded(Rc::new(Loaded { ip, mounts, networks, on_mac, json: Rc::new(json) }))
                     }
                     Ok(Err(e)) => Inspect::Failed(e.to_string()),
                     Err(_) => Inspect::Failed("cancelled".into()),
@@ -503,6 +506,38 @@ impl ContainerDetail {
             }), cx))
         });
 
+        let networks = loaded.as_ref().filter(|d| !d.networks.is_empty()).map(|d| {
+            section("Networks", cx).child(card(
+                d.networks.iter().enumerate().map(|(ix, (name, ip))| {
+                    let row = list_row()
+                        .id(("network", ix))
+                        .gap_2p5()
+                        .cursor_pointer()
+                        .child(Icon::new(IconName::Globe).small().text_color(t.blue))
+                        .child(div().flex_1().min_w_0().truncate().child(name.clone()))
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .max_w(relative(0.45))
+                                .truncate()
+                                .font_family(mono.clone())
+                                .text_color(muted)
+                                .child(ip.clone().unwrap_or_else(|| "–".into())),
+                        )
+                        .child(Icon::new(IconName::ChevronRight).xsmall().text_color(muted))
+                        .tooltip(|window, cx| gpui_component::tooltip::Tooltip::new("Show in Networks").build(window, cx));
+                    let name = name.clone();
+                    // `card` takes plain rows.
+                    div().child(self.nav.row(
+                        row,
+                        key_nav::handler(cx, move |_, _, cx| cx.emit(DetailEvent::RevealNetwork(name.clone()))),
+                        cx,
+                    ))
+                }),
+                cx,
+            ))
+        });
+
         let restart = if running {
             (IconName::RotateCcw, "Restart", Action::Restart)
         } else {
@@ -568,6 +603,7 @@ impl ContainerDetail {
                     .child(summary)
                     .children(ports)
                     .children(mounts)
+                    .children(networks)
                     .child(buttons),
             )
             .into_any_element()

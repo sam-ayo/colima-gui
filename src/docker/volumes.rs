@@ -88,25 +88,6 @@ fn parse_sizes(items: Vec<serde_json::Value>) -> HashMap<String, u64> {
         .collect()
 }
 
-/// Checks a volume name with the rule of the engine: a letter or a digit
-/// first, then letters, digits, `_`, `.`, or `-`. The engine needs at least
-/// two characters.
-pub fn check_name(name: &str) -> std::result::Result<(), &'static str> {
-    let mut chars = name.chars();
-    match chars.next() {
-        None => return Err("Type a name."),
-        Some(c) if !c.is_ascii_alphanumeric() => return Err("The name must start with a letter or a digit."),
-        _ => {}
-    }
-    if name.len() < 2 {
-        return Err("The name must have at least two characters.");
-    }
-    if !chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-')) {
-        return Err("Use only letters, digits, “_”, “.”, and “-”.");
-    }
-    Ok(())
-}
-
 /// Makes a volume with the local driver.
 pub async fn create(docker: &Docker, name: &str) -> Result<VolumeRow> {
     let request = VolumeCreateRequest {
@@ -183,17 +164,6 @@ mod tests {
         ]);
         let serde_json::Value::Array(items) = items else { unreachable!() };
         assert_eq!(parse_sizes(items), HashMap::from([("db".to_string(), 4021)]));
-    }
-
-    #[test]
-    fn names_follow_the_engine_rule() {
-        assert!(check_name("db_data").is_ok());
-        assert!(check_name("a1.b-c").is_ok());
-        assert!(check_name("").is_err());
-        assert!(check_name("a").is_err());
-        assert!(check_name("_db").is_err());
-        assert!(check_name("my data").is_err());
-        assert!(check_name("dät").is_err());
     }
 
     #[test]

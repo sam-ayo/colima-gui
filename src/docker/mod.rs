@@ -6,6 +6,7 @@ pub mod events;
 pub mod image_logo;
 pub mod images;
 pub mod logs;
+pub mod networks;
 pub mod stats;
 pub mod volumes;
 
@@ -71,6 +72,25 @@ pub async fn connect(socket: &str) -> (Option<Docker>, EngineStatus) {
     }
 }
 
+/// Checks the name of a volume or a network with the rule of the engine:
+/// a letter or a digit first, then letters, digits, `_`, `.`, or `-`. The
+/// engine needs at least two characters.
+pub fn check_name(name: &str) -> std::result::Result<(), &'static str> {
+    let mut chars = name.chars();
+    match chars.next() {
+        None => return Err("Type a name."),
+        Some(c) if !c.is_ascii_alphanumeric() => return Err("The name must start with a letter or a digit."),
+        _ => {}
+    }
+    if name.len() < 2 {
+        return Err("The name must have at least two characters.");
+    }
+    if !chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-')) {
+        return Err("Use only letters, digits, “_”, “.”, and “-”.");
+    }
+    Ok(())
+}
+
 /// The Docker socket of one Colima profile.
 pub fn profile_socket(profile: &str) -> String {
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
@@ -99,7 +119,18 @@ pub async fn wait_until_ready(socket: String, done: Arc<AtomicBool>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::profile_of;
+    use super::{check_name, profile_of};
+
+    #[test]
+    fn names_follow_the_engine_rule() {
+        assert!(check_name("db_data").is_ok());
+        assert!(check_name("a1.b-c").is_ok());
+        assert!(check_name("").is_err());
+        assert!(check_name("a").is_err());
+        assert!(check_name("_db").is_err());
+        assert!(check_name("my data").is_err());
+        assert!(check_name("dät").is_err());
+    }
 
     #[test]
     fn profile_comes_from_the_socket_path() {

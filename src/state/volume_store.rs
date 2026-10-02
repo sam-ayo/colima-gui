@@ -152,6 +152,9 @@ pub enum VolumeEvent {
 /// engine measures each volume, so do not load more frequently.
 const SIZES_REFRESH: Duration = Duration::from_secs(60);
 
+/// The rows and the sizes of one engine.
+type SavedVolumes = (IndexMap<String, VolumeRow>, HashMap<String, u64>);
+
 pub struct VolumeStore {
     containers: Entity<ContainerStore>,
     /// The socket of the engine that the rows come from.
@@ -173,6 +176,11 @@ pub struct VolumeStore {
     sizing: bool,
     /// A size load that is necessary after the current one ends.
     sizes_stale: bool,
+    /// True after a list load from the current connection starts. Saved
+    /// rows are not fresh.
+    fresh: bool,
+    /// The last rows and sizes of each engine. A switch shows them at once.
+    saved: HashMap<String, SavedVolumes>,
     /// Increments on each list load and on each engine change. A result
     /// with an old value is out of date, so the store ignores it.
     list_gen: u64,
@@ -190,7 +198,7 @@ impl VolumeStore {
                     this.reload(cx);
                 }
             }
-            StoreEvent::ImagesChanged | StoreEvent::Error(_) => {}
+            StoreEvent::ImagesChanged | StoreEvent::NetworksChanged | StoreEvent::Error(_) => {}
         })];
         VolumeStore {
             containers,
@@ -204,6 +212,8 @@ impl VolumeStore {
             loaded: false,
             sizing: false,
             sizes_stale: false,
+            fresh: false,
+            saved: HashMap::new(),
             list_gen: 0,
             _subs: subs,
         }
@@ -223,7 +233,7 @@ impl VolumeStore {
     /// section shows.
     pub fn activate(&mut self, cx: &mut Context<Self>) {
         self.active = true;
-        if self.loaded {
+        if self.loaded && self.fresh {
             self.load_sizes(cx);
         } else {
             self.reload(cx);
@@ -244,32 +254,45 @@ impl VolumeStore {
         self.sizes_task = None;
     }
 
-    /// Drops the rows of an old engine, and loads the rows of a new one.
+    /// Saves the rows of an old engine, and shows the saved rows of a new
+    /// one. Loads the rows when the new engine connects.
     fn sync_engine(&mut self, cx: &mut Context<Self>) {
         let store = self.containers.read(cx);
-        let socket = (store.status == EngineStatus::Connected)
+        let connected = store.status == EngineStatus::Connected;
+        let socket = (store.shown_status() == EngineStatus::Connected)
             .then(|| store.socket().map(str::to_string))
             .flatten();
-        if socket == self.socket {
-            return;
+        if socket != self.socket {
+            let rows = std::mem::take(&mut self.rows);
+            let sizes = std::mem::take(&mut self.sizes);
+            if self.loaded
+                && let Some(old) = self.socket.take()
+            {
+                self.saved.insert(old, (rows, sizes));
+            }
+            self.socket = socket;
+            self.list_gen += 1;
+            self.removing.clear();
+            self.pruning = false;
+            self.loaded = false;
+            self.fresh = false;
+            self.sizing = false;
+            self.sizes_stale = false;
+            if let Some((rows, sizes)) = self.socket.as_ref().and_then(|s| self.saved.get(s)) {
+                self.rows = rows.clone();
+                self.sizes = sizes.clone();
+                self.loaded = true;
+            }
+            cx.notify();
         }
-        self.socket = socket;
-        self.list_gen += 1;
-        self.rows.clear();
-        self.sizes.clear();
-        self.removing.clear();
-        self.pruning = false;
-        self.loaded = false;
-        self.sizing = false;
-        self.sizes_stale = false;
-        if self.active && self.socket.is_some() {
+        if connected && self.active && !self.fresh && self.socket.is_some() {
             self.reload(cx);
         }
-        cx.notify();
     }
 
     pub fn reload(&mut self, cx: &mut Context<Self>) {
         let Some(docker) = self.containers.read(cx).docker().cloned() else { return };
+        self.fresh = true;
         self.list_gen += 1;
         let generation = self.list_gen;
         let rx = Backend::global(cx).spawn(async move { volumes::list_all(&docker).await });
@@ -367,7 +390,7 @@ impl VolumeStore {
         .detach();
     }
 
-    /// Makes a volume. The name must pass `volumes::check_name`.
+    /// Makes a volume. The name must pass `docker::check_name`.
     pub fn create(&mut self, name: &str, cx: &mut Context<Self>) {
         let Some(docker) = self.containers.read(cx).docker().cloned() else { return };
         let name = name.to_string();
@@ -463,6 +486,7 @@ mod tests {
             created: 0,
             finished_at: None,
             volumes: volumes.iter().map(|v| v.to_string()).collect(),
+            networks: Vec::new(),
         }
     }
 

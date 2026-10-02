@@ -86,6 +86,8 @@ pub struct EventPlan {
     pub volumes: bool,
     /// An image was pulled, tagged, untagged, or deleted.
     pub images: bool,
+    /// A network changed, or a container joined or left a network.
+    pub networks: bool,
 }
 
 pub fn plan_events(batch: &[EngineEvent]) -> EventPlan {
@@ -108,6 +110,7 @@ pub fn plan_events(batch: &[EngineEvent]) -> EventPlan {
             }
             EngineEvent::Volume => plan.volumes = true,
             EngineEvent::Image => plan.images = true,
+            EngineEvent::Network => plan.networks = true,
             EngineEvent::Container { id, action } => {
                 if action == "destroy" {
                     plan.remove.push(id.clone());
@@ -241,6 +244,9 @@ pub enum StoreEvent {
     /// The image list is out of date: an image event came, or the event
     /// stream connected again.
     ImagesChanged,
+    /// The network list is out of date: a network event came, or the event
+    /// stream connected again.
+    NetworksChanged,
     Error(String),
 }
 
@@ -262,6 +268,13 @@ pub struct ContainerStore {
     status_task: Option<Task<()>>,
     /// True from the connection until the first full list arrives.
     loading: bool,
+    /// The last rows of each engine. A switch shows them at once, and the
+    /// list of the new connection replaces them.
+    saved: HashMap<String, Vec<ContainerRow>>,
+    /// The sockets that a background load of saved rows runs on now.
+    prefetching: HashSet<String>,
+    /// True while the rows are saved rows, before the connection is ready.
+    stale: bool,
 }
 
 impl EventEmitter<StoreEvent> for ContainerStore {}
@@ -279,6 +292,9 @@ impl ContainerStore {
             retry_task: None,
             status_task: None,
             loading: false,
+            saved: HashMap::new(),
+            prefetching: HashSet::new(),
+            stale: false,
         };
         this.connect(cx);
         this
@@ -297,23 +313,71 @@ impl ContainerStore {
         self.socket.as_deref().and_then(engine::profile_of)
     }
 
+    /// The status that the main area shows. While a switch shows saved
+    /// rows, the status shows as connected.
+    pub fn shown_status(&self) -> EngineStatus {
+        if self.stale && self.status == EngineStatus::Connecting {
+            EngineStatus::Connected
+        } else {
+            self.status.clone()
+        }
+    }
+
     /// Connects to a different engine. The rows of the old engine go away.
+    /// Saved rows of the new engine show until its list arrives.
     pub fn switch_to(&mut self, socket: String, cx: &mut Context<Self>) {
         if self.socket.as_deref() == Some(socket.as_str()) {
             return;
         }
+        if self.status == EngineStatus::Connected && !self.loading
+            && let Some(old) = &self.socket
+        {
+            self.saved.insert(old.clone(), self.set.rows.values().cloned().collect());
+        }
         self.epoch += 1;
-        self.socket = Some(socket);
         self.docker = None;
         // The old pump stops when its channel closes.
         self.events_task = None;
         self.status_task = None;
         self.retry_task = None;
         self.set = ContainerSet::default();
+        self.stale = false;
+        if let Some(rows) = self.saved.get(&socket) {
+            let _ = self.set.replace_all(rows.clone());
+            self.stale = true;
+        }
+        self.socket = Some(socket);
         self.status = EngineStatus::Connecting;
         self.loading = false;
         self.connect(cx);
         self.changed(cx);
+    }
+
+    /// Loads the rows of other engines in the background, so that the
+    /// first switch to them also shows rows at once.
+    pub fn prefetch(&mut self, sockets: Vec<String>, cx: &mut Context<Self>) {
+        for socket in sockets {
+            if self.socket.as_deref() == Some(socket.as_str())
+                || self.saved.contains_key(&socket)
+                || !self.prefetching.insert(socket.clone())
+            {
+                continue;
+            }
+            let rx = Backend::global(cx).spawn(connect_and_list(Some(socket)));
+            cx.spawn(async move |this, cx| {
+                let Ok((socket, _, _, rows)) = rx.await else { return };
+                let _ = this.update(cx, |this, _| {
+                    this.prefetching.remove(&socket);
+                    // Rows from a switch are more recent.
+                    if let Some(rows) = rows
+                        && this.socket.as_ref() != Some(&socket)
+                    {
+                        this.saved.entry(socket).or_insert(rows);
+                    }
+                });
+            })
+            .detach();
+        }
     }
 
     pub fn is_loading(&self) -> bool {
@@ -346,12 +410,17 @@ impl ContainerStore {
                 if this.socket.is_none() {
                     this.socket = Some(socket);
                 }
+                // Saved rows can be old. Without a new list, show the
+                // spinner, not the old rows.
+                if std::mem::take(&mut this.stale) && rows.is_none() {
+                    this.set = ContainerSet::default();
+                }
                 match docker {
-                Some(docker) => {
-                    if let Some(rows) = rows {
-                        let _ = this.set.replace_all(rows);
-                        this.loading = false;
-                    }
+                    Some(docker) => {
+                        if let Some(rows) = rows {
+                            let _ = this.set.replace_all(rows);
+                            this.loading = false;
+                        }
                         this.on_connected(docker, cx)
                     }
                     None => this.on_down(status, cx),
@@ -442,6 +511,9 @@ impl ContainerStore {
         }
         if plan.images || plan.resync {
             cx.emit(StoreEvent::ImagesChanged);
+        }
+        if plan.networks || plan.resync {
+            cx.emit(StoreEvent::NetworksChanged);
         }
         let mut changed = plan.link.is_some();
         for id in &plan.remove {
@@ -659,6 +731,7 @@ mod tests {
             created: 0,
             finished_at: None,
             volumes: Vec::new(),
+            networks: Vec::new(),
         }
     }
 
@@ -697,6 +770,7 @@ mod tests {
         assert!(!plan_events(&[ev("a", "start")]).volumes);
         assert!(plan_events(&[EngineEvent::Image]).images);
         assert!(!plan_events(&[EngineEvent::Volume]).images);
+        assert!(plan_events(&[EngineEvent::Network]).networks);
     }
 
     #[test]
