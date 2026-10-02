@@ -53,6 +53,8 @@ const DETAIL_MIN_WIDTH: f32 = 380.;
 const DETAIL_MAX_WIDTH: f32 = 800.;
 const DETAIL_DEFAULT_MAX_WIDTH: f32 = 480.;
 const DETAIL_DEFAULT_FRACTION: f32 = 0.36;
+/// The time after the last scroll event until the hover effects show again.
+const SCROLL_COVER_DELAY: Duration = Duration::from_millis(150);
 /// The container list keeps this width when the sidebar or the detail pane
 /// gets wider. At this width, the rows hide the ports column, and the row
 /// actions still show. The minimum window width leaves this space next to
@@ -168,6 +170,10 @@ pub struct AppView {
     engine_changes: usize,
     _status_menu: Entity<StatusMenu>,
     toaster: Entity<Toaster>,
+    /// The pointer position at the last scroll event, and the timer that
+    /// removes the scroll cover. It is `Some` while a scroll continues, and
+    /// each scroll event starts the timer again.
+    scroll_cover: Option<(Point<Pixels>, Task<()>)>,
     _subs: Vec<Subscription>,
     _detail_sub: Option<Subscription>,
     _volume_detail_sub: Option<Subscription>,
@@ -306,6 +312,7 @@ impl AppView {
             engine_changes: 0,
             _status_menu: status_menu,
             toaster: cx.new(|cx| Toaster::new(window, cx)),
+            scroll_cover: None,
             _subs: subs,
             _detail_sub: None,
             _volume_detail_sub: None,
@@ -749,6 +756,33 @@ impl AppView {
         .detach();
     }
 
+    /// Shows the scroll cover, and removes it when no scroll event comes for
+    /// a short time. The rows below the pointer then show no hover fill while
+    /// they move.
+    fn cover_scroll(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        if self.scroll_cover.is_none() {
+            cx.notify();
+        }
+        let timer = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SCROLL_COVER_DELAY).await;
+            let _ = this.update(cx, |this, cx| {
+                this.scroll_cover = None;
+                cx.notify();
+            });
+        });
+        self.scroll_cover = Some((position, timer));
+    }
+
+    /// Removes the scroll cover when the pointer moves. The row below the
+    /// pointer then shows its hover fill again. A move event at the position
+    /// of the scroll does not remove the cover.
+    fn uncover_scroll(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        if self.scroll_cover.as_ref().is_some_and(|(at, _)| *at != position) {
+            self.scroll_cover = None;
+            cx.notify();
+        }
+    }
+
     /// Starts the machine of the engine. The machine store starts a listed
     /// profile, so the sidebar shows the progress too.
     fn start_engine(&mut self, cx: &mut Context<Self>) {
@@ -1163,9 +1197,29 @@ impl Render for AppView {
                     this.resize_detail(ev.event.position.x, drag, window, cx)
                 }
             }))
+            // A scroll event goes to the window below the scroll cover, so
+            // this listener gets each event of the scroll.
+            .on_scroll_wheel(cx.listener(|this, ev: &ScrollWheelEvent, _, cx| {
+                this.cover_scroll(ev.position, cx)
+            }))
             .child(sidebar)
             .child(main)
             .child(self.render_sidebar_button(window, cx))
+            // The scroll cover stops the hover effects and the tooltips
+            // below the pointer while the content moves. The scroll events
+            // go through the cover to the scroll areas below it.
+            .when(self.scroll_cover.is_some(), |d| {
+                d.child(
+                    div()
+                        .id("scroll-cover")
+                        .absolute()
+                        .inset_0()
+                        .block_mouse_except_scroll()
+                        .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
+                            this.uncover_scroll(ev.position, cx)
+                        })),
+                )
+            })
             // A resize drag keeps the resize cursor when the pointer leaves
             // the thin handle. The cover also stops hover effects and
             // tooltips below the pointer during the drag.
