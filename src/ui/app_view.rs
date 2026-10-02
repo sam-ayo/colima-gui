@@ -306,17 +306,23 @@ impl AppView {
         }
     }
 
+    /// Moves the focus to the list of the current section. A section with
+    /// no list takes the focus from all elements.
+    fn focus_list(&self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.section {
+            Section::Containers => self.list.focus_handle(cx).focus(window, cx),
+            Section::Volumes => self.volume_list.focus_handle(cx).focus(window, cx),
+            _ => window.blur(cx),
+        }
+    }
+
     /// Shows a section, and moves the focus to its list.
     fn set_section(&mut self, section: Section, window: &mut Window, cx: &mut Context<Self>) {
         self.section = section;
-        match section {
-            Section::Containers => self.list.focus_handle(cx).focus(window, cx),
-            Section::Volumes => {
-                self.volumes.update(cx, |v, cx| v.activate(cx));
-                self.volume_list.focus_handle(cx).focus(window, cx);
-            }
-            _ => {}
+        if section == Section::Volumes {
+            self.volumes.update(cx, |v, cx| v.activate(cx));
         }
+        self.focus_list(window, cx);
         if section != Section::Volumes {
             self.volumes.update(cx, |v, _| v.deactivate());
         }
@@ -1122,6 +1128,18 @@ impl Render for AppView {
             .text_size(px(text::BODY))
             .text_color(t.foreground)
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
+            // A click on an area that cannot take the focus removes the
+            // focus from a search or filter field. The focus goes to the
+            // list, so the list shortcuts work. A focusable element below
+            // the pointer prevents the default, and keeps its focus.
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    if !window.default_prevented() {
+                        this.focus_list(window, cx);
+                    }
+                }),
+            )
             .on_drag_move(cx.listener(|this, ev: &DragMoveEvent<SidebarResize>, window, cx| {
                 let drag = ev.dragged_item().downcast_ref::<SidebarResize>();
                 if let Some(drag) = drag {
