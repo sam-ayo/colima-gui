@@ -1,16 +1,21 @@
 //! Finds new versions of the app, and installs them.
 //!
-//! Each release publishes `latest.json` and one installer package for each
-//! architecture (see `scripts/release.sh`). The manifest gives an Ed25519
-//! signature of each package. The signed message is the version, a newline,
-//! and the package, so that an old package cannot show as a new version.
-//! The app installs a package only when the signature agrees with
-//! `PUBLIC_KEY`.
+//! Each release publishes `latest.json`, and for each architecture one
+//! installer package and one zip archive of the app (see
+//! `scripts/release.sh`). The manifest gives an Ed25519 signature of each
+//! file. The signed message is the version, a newline, and the file, so that
+//! an old file cannot show as a new version. The app installs a file only
+//! when the signature agrees with `PUBLIC_KEY`.
 //!
 //! The app looks for a new version at start and then at an interval. The
-//! "Check for Updates…" menu item also starts a check. The installer needs an
-//! administrator password, because the package links the tools into
-//! `/usr/local/bin`.
+//! "Check for Updates…" menu item also starts a check.
+//!
+//! The installer package needs an administrator password, because it links
+//! the tools into `/usr/local/bin`. The package then gives the app to the
+//! user (see `scripts/package.sh`). Thus the next updates replace the app
+//! from the archive, and do not need a password. The links stay correct,
+//! because the path of the app does not change. The app uses the package
+//! when it cannot replace itself.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -53,8 +58,12 @@ struct Manifest {
     version: String,
     #[serde(default)]
     notes: String,
-    /// The packages, by `std::env::consts::ARCH`.
+    /// The installer packages, by `std::env::consts::ARCH`.
     packages: HashMap<String, Package>,
+    /// The zip archives of the app, by `std::env::consts::ARCH`. Releases
+    /// before 0.1.8 do not have them.
+    #[serde(default)]
+    apps: HashMap<String, Package>,
 }
 
 #[derive(Deserialize)]
@@ -133,10 +142,11 @@ async fn run(interactive: bool, backend: &Backend, cx: &mut AsyncApp) -> Result<
     if !interactive && native::saved_string(SKIPPED_KEY).as_deref() == Some(&manifest.version) {
         return Ok(());
     }
-    let Manifest { version, notes, mut packages } = manifest;
+    let Manifest { version, notes, mut packages, mut apps } = manifest;
     let package = packages
         .remove(std::env::consts::ARCH)
         .ok_or_else(|| anyhow!("version {version} has no package for this Mac"))?;
+    let app = apps.remove(std::env::consts::ARCH);
 
     let mut info = format!("{APP_NAME} {version} is available. You have {current}.");
     if !notes.trim().is_empty() {
@@ -158,10 +168,28 @@ async fn run(interactive: bool, backend: &Backend, cx: &mut AsyncApp) -> Result<
         _ => return Ok(()),
     }
 
-    let path = backend.spawn(download(package, version)).await??;
-    let done = backend
-        .spawn(async move { tokio::task::spawn_blocking(move || install(&path)).await })
-        .await???;
+    // Replace the app without a password when possible. When that fails,
+    // nothing changed, so the installer package can still run.
+    let mut done = false;
+    if let Some(app) = app.filter(|_| can_replace()) {
+        let version = version.clone();
+        let result = backend
+            .spawn(async move {
+                let path = download(app, version, "colima-gui.zip").await?;
+                tokio::task::spawn_blocking(move || replace(&path)).await?
+            })
+            .await?;
+        match result {
+            Ok(()) => done = true,
+            Err(err) => tracing::warn!("could not replace the app: {err:#}"),
+        }
+    }
+    if !done {
+        let path = backend.spawn(download(package, version, "colima-gui.pkg")).await??;
+        done = backend
+            .spawn(async move { tokio::task::spawn_blocking(move || install(&path)).await })
+            .await???;
+    }
     if done {
         relaunch()?;
         let _ = cx.update(|cx| cx.quit());
@@ -193,9 +221,8 @@ async fn fetch_manifest() -> Result<Manifest> {
         .context("could not read the update manifest")
 }
 
-/// Downloads the package and checks its signature. Returns the path of the
-/// package.
-async fn download(package: Package, version: String) -> Result<PathBuf> {
+/// Downloads a file and checks its signature. Returns the path of the file.
+async fn download(package: Package, version: String, name: &str) -> Result<PathBuf> {
     let bytes = client()?
         .get(&package.url)
         .send()
@@ -209,7 +236,7 @@ async fn download(package: Package, version: String) -> Result<PathBuf> {
     // signature and the version can contain any text.
     let dir = std::env::temp_dir().join("colima-gui-update");
     tokio::fs::create_dir_all(&dir).await?;
-    let path = dir.join("colima-gui.pkg");
+    let path = dir.join(name);
     tokio::fs::write(&path, &bytes).await?;
     Ok(path)
 }
@@ -260,6 +287,74 @@ fn install(package: &Path) -> Result<bool> {
     bail!("the installer failed: {}", stderr.trim())
 }
 
+/// True when the user can replace the contents of the app without an
+/// administrator password. The installer package of version 0.1.8 and later
+/// gives the app to the user.
+fn can_replace() -> bool {
+    let writable = |path: &str| {
+        let path = std::ffi::CString::new(path).expect("the path has no NUL");
+        // SAFETY: `path` is a valid C string.
+        unsafe { libc::access(path.as_ptr(), libc::W_OK) == 0 }
+    };
+    writable(APP_PATH) && writable(&format!("{APP_PATH}/Contents"))
+}
+
+/// Replaces the contents of the app with the app in a zip archive. The
+/// running process keeps its open files, so it can continue until the
+/// relaunch.
+fn replace(archive: &Path) -> Result<()> {
+    let dir = archive.with_extension("");
+    let _ = std::fs::remove_dir_all(&dir);
+    let result = (|| {
+        let output = Command::new("/usr/bin/ditto")
+            .args(["-x", "-k"])
+            .arg(archive)
+            .arg(&dir)
+            .output()
+            .context("could not start ditto")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("could not open the archive: {}", stderr.trim());
+        }
+        let new = dir.join(Path::new(APP_PATH).file_name().expect("the path has a name"));
+        // Make sure that the archive has a complete app, before it replaces
+        // the app that works.
+        let output = Command::new("/usr/bin/codesign")
+            .args(["--verify", "--deep", "--strict"])
+            .arg(&new)
+            .output()
+            .context("could not start codesign")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("the new app has a bad code signature: {}", stderr.trim());
+        }
+        // One atomic step exchanges the two directories. After it, the old
+        // contents are in the temporary directory.
+        swap(&new.join("Contents"), &Path::new(APP_PATH).join("Contents"))
+    })();
+    let _ = std::fs::remove_file(archive);
+    let _ = std::fs::remove_dir_all(&dir);
+    result
+}
+
+#[cfg(target_os = "macos")]
+fn swap(a: &Path, b: &Path) -> Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt as _;
+    let a = CString::new(a.as_os_str().as_bytes())?;
+    let b = CString::new(b.as_os_str().as_bytes())?;
+    // SAFETY: Both paths are valid C strings.
+    if unsafe { libc::renamex_np(a.as_ptr(), b.as_ptr(), libc::RENAME_SWAP) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("could not replace the app");
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn swap(_: &Path, _: &Path) -> Result<()> {
+    bail!("only macOS can replace the app")
+}
+
 /// Opens the new app after this process stops.
 fn relaunch() -> Result<()> {
     let pid = std::process::id();
@@ -295,6 +390,15 @@ fn is_newer(new: &str, current: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_a_manifest_without_apps() {
+        let manifest: Manifest = serde_json::from_str(
+            r#"{"version": "0.1.7", "packages": {"aarch64": {"url": "u", "signature": "s"}}}"#,
+        )
+        .unwrap();
+        assert!(manifest.apps.is_empty());
+    }
 
     #[test]
     fn compares_versions() {

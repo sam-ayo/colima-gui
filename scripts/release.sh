@@ -1,7 +1,7 @@
 #!/bin/bash
 # Builds the release files that the updater in the app reads (see
-# src/updater.rs): one signed installer package for each architecture, and
-# latest.json. The release workflow does not use this script. It builds each
+# src/updater.rs): one signed installer package and one signed zip archive
+# of the app for each architecture, and latest.json. The release workflow does not use this script. It builds each
 # architecture in a different job, and then runs scripts/sign-release.sh.
 #
 # Usage: scripts/release.sh [notes file]
@@ -32,8 +32,9 @@ mkdir -p "$out"
 
 for arch in arm64 x86_64; do
     "$root/scripts/package.sh" "$arch"
-    file="colima-gui-$version-$arch.pkg"
-    cp "$target/package/$arch/$file" "$out/$file"
+    for file in "colima-gui-$version-$arch.pkg" "colima-gui-$version-$arch.zip"; do
+        cp "$target/package/$arch/$file" "$out/$file"
+    done
 done
 
 "$root/scripts/sign-release.sh" "$out" "${1:-}"

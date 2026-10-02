@@ -8,8 +8,9 @@
 # Usage: scripts/package.sh [arm64 | x86_64]
 # The default architecture is the architecture of this Mac. For the other
 # architecture, first run `rustup target add <rust target>`.
-# Output: "target/package/<arch>/Colima GUI.app" and
-#         target/package/<arch>/colima-gui-<version>-<arch>.pkg
+# Output: "target/package/<arch>/Colima GUI.app",
+#         target/package/<arch>/colima-gui-<version>-<arch>.pkg, and
+#         target/package/<arch>/colima-gui-<version>-<arch>.zip
 # Needs: cargo, curl, and the Xcode command line tools (pkgbuild).
 #
 # Signature and notarization. Without these variables, the script makes an
@@ -163,6 +164,10 @@ if [ -n "${CODESIGN_IDENTITY:-}" ]; then
     codesign --verify --deep --strict "$app"
 fi
 
+# The updater replaces an installed app with the app in this archive, and
+# does not need a password (see src/updater.rs).
+ditto -c -k --keepParent "$app" "$out/colima-gui-$version-$arch.zip"
+
 # The installer package. The postinstall script links the tools.
 pkgroot="$cache/pkgroot-$arch"
 scripts="$cache/pkgscripts-$arch"
@@ -174,7 +179,8 @@ cat > "$scripts/postinstall" <<'EOF'
 #!/bin/bash
 # Links the tools in the app into /usr/local/bin. A tool that is already
 # installed (for example from Homebrew) stays as it is.
-tools="/Applications/Colima GUI.app/Contents/Resources/tools/bin"
+app="/Applications/Colima GUI.app"
+tools="$app/Contents/Resources/tools/bin"
 # Versions 0.1.5 and earlier used the name "Colima.app". Remove that app, and
 # move its links to the new app.
 old="/Applications/Colima.app"
@@ -192,6 +198,13 @@ for tool in colima limactl lima docker; do
         ln -s "$tools/$tool" "$link"
     fi
 done
+# Give the app to the user, so that the updater can replace it without an
+# administrator password. The user is the owner of the console, because the
+# installer runs this script as root.
+user="$(stat -f %Su /dev/console)"
+if [ -n "$user" ] && [ "$user" != root ] && id "$user" >/dev/null 2>&1; then
+    chown -R "$user" "$app"
+fi
 exit 0
 EOF
 chmod 755 "$scripts/postinstall"
@@ -249,3 +262,4 @@ fi
 echo
 echo "app: $app"
 echo "installer: $pkg"
+echo "archive: $out/colima-gui-$version-$arch.zip"
