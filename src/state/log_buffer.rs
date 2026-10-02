@@ -40,6 +40,11 @@ impl LogBuffer {
         self.lines.len()
     }
 
+    /// The filter text, in lower case.
+    pub fn filter(&self) -> &str {
+        &self.filter
+    }
+
     pub fn is_filtered(&self) -> bool {
         !self.filter.is_empty()
     }
@@ -138,8 +143,10 @@ mod tests {
     fn line(text: &str) -> LogLine {
         LogLine {
             stream: LogStream::Stdout,
-            timestamp: String::new(),
+            time: None,
             text: text.into(),
+            level: None,
+            spans: Vec::new(),
         }
     }
 

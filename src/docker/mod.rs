@@ -1,5 +1,6 @@
 //! Docker Engine API access through the Unix socket (bollard).
 
+pub mod ansi;
 pub mod containers;
 pub mod events;
 pub mod image_logo;
@@ -152,7 +153,7 @@ mod live_tests {
         assert_eq!(buf.len(), MAX_LINES);
         assert_eq!(buf.evicted, 150_000);
         assert_eq!(buf.visible_line(MAX_LINES - 1).unwrap().text, "200000");
-        assert!(!buf.visible_line(0).unwrap().timestamp.is_empty());
+        assert!(buf.visible_line(0).unwrap().time.is_some());
     }
 
     #[tokio::test]
