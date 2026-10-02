@@ -67,6 +67,9 @@ pub enum DetailEvent {
 struct Loaded {
     ip: Option<String>,
     mounts: Vec<Mount>,
+    /// For each mount: `Some(true)` for a folder on the Mac, `Some(false)`
+    /// for a file on the Mac, `None` for a volume or a path in the VM only.
+    on_mac: Vec<Option<bool>>,
     json: Rc<Json>,
 }
 
@@ -217,7 +220,16 @@ impl ContainerDetail {
                     Ok(Ok(Details { ip, mounts, json })) => {
                         let json = Json::new(json);
                         this.sync_inspect_list(json.lines.len());
-                        Inspect::Loaded(Rc::new(Loaded { ip, mounts, json: Rc::new(json) }))
+                        // Colima shares the home folder at the same path, so
+                        // a bind mount source is often also a path on the Mac.
+                        let on_mac = mounts
+                            .iter()
+                            .map(|m| {
+                                let meta = (!m.volume).then(|| std::fs::metadata(&m.source).ok()).flatten();
+                                meta.map(|meta| meta.is_dir())
+                            })
+                            .collect();
+                        Inspect::Loaded(Rc::new(Loaded { ip, mounts, on_mac, json: Rc::new(json) }))
                     }
                     Ok(Err(e)) => Inspect::Failed(e.to_string()),
                     Err(_) => Inspect::Failed("cancelled".into()),
@@ -405,6 +417,7 @@ impl ContainerDetail {
                     _ => m.source.clone(),
                 };
                 let volume = m.volume.then(|| m.source.clone());
+                let on_mac = d.on_mac.get(ix).copied().flatten();
                 let row = list_row()
                     .id(("mount", ix))
                     .gap_2p5()
@@ -430,9 +443,10 @@ impl ContainerDetail {
                             .text_color(muted)
                             .child(m.destination.clone()),
                     );
-                // A volume opens in the volume list.
-                let row = match volume {
-                    Some(name) => self.nav.row(
+                // A volume opens in the volume list. A folder on the Mac
+                // opens in Finder, and Finder shows a file on the Mac.
+                let row = match (volume, on_mac) {
+                    (Some(name), _) => self.nav.row(
                         row.cursor_pointer()
                             .child(Icon::new(IconName::ChevronRight).xsmall().text_color(muted))
                             .tooltip(|window, cx| {
@@ -441,7 +455,26 @@ impl ContainerDetail {
                         key_nav::handler(cx, move |_, _, cx| cx.emit(DetailEvent::RevealVolume(name.clone()))),
                         cx,
                     ),
-                    None => row,
+                    (None, Some(folder)) => {
+                        let path = std::path::PathBuf::from(&m.source);
+                        self.nav.row(
+                            row.cursor_pointer()
+                                .child(Icon::new(IconName::ChevronRight).xsmall().text_color(muted))
+                                .tooltip(move |window, cx| {
+                                    let label = if folder { "Open in Finder" } else { "Show in Finder" };
+                                    gpui_component::tooltip::Tooltip::new(label).build(window, cx)
+                                }),
+                            Rc::new(move |_, cx| {
+                                if folder {
+                                    cx.open_with_system(&path)
+                                } else {
+                                    cx.reveal_path(&path)
+                                }
+                            }),
+                            cx,
+                        )
+                    }
+                    (None, None) => row,
                 };
                 // `card` takes plain rows.
                 div().child(row)
