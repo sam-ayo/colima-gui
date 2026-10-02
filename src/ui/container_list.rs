@@ -624,14 +624,9 @@ impl ContainerList {
                             .when_some(compose_file, |d, path| {
                                 d.child(compose_file_link(ix, path, cx)).child("·")
                             })
-                            .children(summary.into_iter().enumerate().flat_map(|(i, (part, color))| {
-                                let sep = (i > 0).then(|| div().child("·"));
-                                let part = div()
-                                    .flex_shrink_0()
-                                    .when_some(color, |d, c| d.text_color(c))
-                                    .child(part);
-                                sep.into_iter().chain([part])
-                            })),
+                            // One text, so a narrow list truncates the summary
+                            // and does not draw it over the right column.
+                            .child(div().flex_1().min_w_0().truncate().child(summary_text(summary))),
                     ),
             )
             // The column has the width of the ports column of the service
@@ -1053,6 +1048,24 @@ pub(super) fn tree_lines(tree: Tree, line: Hsla) -> Vec<Div> {
         Tree::Branch => vec![elbow(), rest()],
         Tree::Last => vec![elbow()],
     }
+}
+
+/// Joins the parts of a group summary with dots. A part with a color keeps
+/// its color.
+fn summary_text(parts: Vec<(String, Option<Hsla>)>) -> StyledText {
+    let mut text = String::new();
+    let mut highlights = Vec::new();
+    for (i, (part, color)) in parts.into_iter().enumerate() {
+        if i > 0 {
+            text.push_str(" · ");
+        }
+        let start = text.len();
+        text.push_str(&part);
+        if let Some(color) = color {
+            highlights.push((start..text.len(), HighlightStyle::color(color)));
+        }
+    }
+    StyledText::new(text).with_highlights(highlights)
 }
 
 /// The name of the main Compose file. A click shows the file in Finder.
