@@ -17,10 +17,10 @@ use crate::docker::volumes::{self, VolumeInfo};
 use crate::runtime::Backend;
 use crate::state::container_store::ContainerStore;
 use crate::state::volume_store::VolumeStore;
+use crate::ui::json_view::{self, Json};
 use crate::ui::container_detail::{card, field, list_row, loading, section, segmented_control};
-use crate::ui::{ENTER_DURATION, NATIVE_BUTTON_HEIGHT, TOOLBAR_HEIGHT, code_line, drag_area, native, tabular_nums, text, toast};
+use crate::ui::{ENTER_DURATION, NATIVE_BUTTON_HEIGHT, TOOLBAR_HEIGHT, drag_area, native, tabular_nums, text, toast};
 
-const INSPECT_LINE_HEIGHT: f32 = 18.;
 const FILE_ROW_HEIGHT: f32 = 30.;
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -65,7 +65,7 @@ pub struct VolumeDetail {
     /// The number of tab changes. Each change fades in the new tab body.
     tab_changes: usize,
     info: Load<Rc<VolumeInfo>>,
-    inspect_lines: Rc<Vec<SharedString>>,
+    inspect_json: Rc<Json>,
     inspect_list: ListState,
     /// The folder that the Files tab shows, as names below the mount point.
     folder: Vec<String>,
@@ -94,7 +94,7 @@ impl VolumeDetail {
             tab: VolumeTab::Info,
             tab_changes: 0,
             info: Load::Loading,
-            inspect_lines: Rc::new(Vec::new()),
+            inspect_json: Rc::new(Json::default()),
             inspect_list: ListState::new(0, ListAlignment::Top, px(200.)),
             folder: Vec::new(),
             files: None,
@@ -132,9 +132,9 @@ impl VolumeDetail {
             let _ = this.update(cx, |this, cx| {
                 this.info = match result {
                     Ok(Ok(info)) => {
-                        let lines: Vec<_> = info.json.lines().map(|l| SharedString::from(l.to_string())).collect();
-                        this.inspect_list.reset_with_uniform_height(lines.len(), px(INSPECT_LINE_HEIGHT));
-                        this.inspect_lines = Rc::new(lines);
+                        let json = Json::new(info.json.clone());
+                        this.inspect_list.reset_with_uniform_height(json.lines.len(), px(json_view::LINE_HEIGHT));
+                        this.inspect_json = Rc::new(json);
                         Load::Loaded(Rc::new(info))
                     }
                     Ok(Err(e)) => Load::Failed(e.to_string()),
@@ -527,24 +527,7 @@ impl VolumeDetail {
         match &self.info {
             Load::Loading => loading("volume-inspect-loading"),
             Load::Failed(e) => div().p_3().text_color(t.red).child(e.clone()).into_any_element(),
-            Load::Loaded(_) => {
-                let lines = self.inspect_lines.clone();
-                div()
-                    .relative()
-                    .size_full()
-                    .font_family(t.mono_font_family.clone())
-                    .text_size(px(text::SUBHEADLINE))
-                    .line_height(px(INSPECT_LINE_HEIGHT))
-                    .child(
-                        list(self.inspect_list.clone(), move |ix, _, _| match lines.get(ix) {
-                            Some(line) => div().flex().w_full().px_5().child(code_line(line.clone())).into_any_element(),
-                            None => div().into_any_element(),
-                        })
-                        .size_full(),
-                    )
-                    .child(Scrollbar::vertical(&self.inspect_list))
-                    .into_any_element()
-            }
+            Load::Loaded(_) => json_view::render(&self.inspect_json, &self.inspect_list, cx),
         }
     }
 }

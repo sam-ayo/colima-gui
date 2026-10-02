@@ -6,7 +6,6 @@ use std::rc::Rc;
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants as _};
-use gpui_component::scroll::Scrollbar;
 use gpui_component::{ActiveTheme, Disableable as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit_assets::IconName;
 
@@ -16,14 +15,13 @@ use crate::docker::{ContainerRow, discover_socket};
 use crate::runtime::Backend;
 use crate::state::container_store::{ContainerStore, StoreEvent};
 use crate::state::stats_store::StatsStore;
+use crate::ui::json_view::{self, Json};
 use crate::ui::logs_view::LogsView;
 use crate::ui::stats_view::StatsView;
 use crate::ui::{
-    ENTER_DURATION, NATIVE_BUTTON_HEIGHT, SNAPPY_SPRING, TOOLBAR_HEIGHT, code_line, delayed_reveal,
+    ENTER_DURATION, NATIVE_BUTTON_HEIGHT, SNAPPY_SPRING, TOOLBAR_HEIGHT, delayed_reveal,
     drag_area, native, spinner, tabular_nums, text,
 };
-
-const INSPECT_LINE_HEIGHT: f32 = 18.;
 
 /// The width of each tab segment. All segments have the same width, so the
 /// selected fill can move from one segment to the next.
@@ -68,7 +66,7 @@ pub enum DetailEvent {
 struct Loaded {
     ip: Option<String>,
     mounts: Vec<Mount>,
-    lines: Rc<Vec<SharedString>>,
+    json: Rc<Json>,
 }
 
 enum Inspect {
@@ -177,10 +175,9 @@ impl ContainerDetail {
             let _ = this.update(cx, |this, cx| {
                 this.inspect = match result {
                     Ok(Ok(Details { ip, mounts, json })) => {
-                        let lines: Vec<_> =
-                            json.lines().map(|l| SharedString::from(l.to_string())).collect();
-                        this.sync_inspect_list(lines.len());
-                        Inspect::Loaded(Rc::new(Loaded { ip, mounts, lines: Rc::new(lines) }))
+                        let json = Json::new(json);
+                        this.sync_inspect_list(json.lines.len());
+                        Inspect::Loaded(Rc::new(Loaded { ip, mounts, json: Rc::new(json) }))
                     }
                     Ok(Err(e)) => Inspect::Failed(e.to_string()),
                     Err(_) => Inspect::Failed("cancelled".into()),
@@ -197,7 +194,7 @@ impl ContainerDetail {
         let list = &self.inspect_list;
         let old = list.item_count();
         if !matches!(self.inspect, Inspect::Loaded(_)) {
-            list.reset_with_uniform_height(count, px(INSPECT_LINE_HEIGHT));
+            list.reset_with_uniform_height(count, px(json_view::LINE_HEIGHT));
             return;
         }
         if count > old {
@@ -263,31 +260,7 @@ impl ContainerDetail {
                 .text_color(t.red)
                 .child(e.clone())
                 .into_any_element(),
-            Inspect::Loaded(data) => {
-                let lines = data.lines.clone();
-                div()
-                    .relative()
-                    .size_full()
-                    .font_family(t.mono_font_family.clone())
-                    .text_size(px(text::SUBHEADLINE))
-                    .line_height(px(INSPECT_LINE_HEIGHT))
-                    .child(
-                        list(self.inspect_list.clone(), move |ix, _, _| {
-                            match lines.get(ix) {
-                                Some(line) => div()
-                                    .flex()
-                                    .w_full()
-                                    .px_5()
-                                    .child(code_line(line.clone()))
-                                    .into_any_element(),
-                                None => div().into_any_element(),
-                            }
-                        })
-                        .size_full(),
-                    )
-                    .child(Scrollbar::vertical(&self.inspect_list))
-                    .into_any_element()
-            }
+            Inspect::Loaded(data) => json_view::render(&data.json, &self.inspect_list, cx),
         }
     }
 

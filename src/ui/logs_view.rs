@@ -377,8 +377,8 @@ fn filter_ranges(text: &str, filter: &str) -> Vec<Range<usize>> {
 }
 
 /// A line of monospace text with highlights, which wraps in the space it
-/// gets. The wrapped rows start at the indent of the first row, as in
-/// `code_line`. A click on a link opens its URL.
+/// gets. The wrapped rows start at the indent of the first row, so nested
+/// data keeps its shape. A click on a link opens its URL.
 fn styled_line(
     ix: usize,
     text: SharedString,

@@ -2,6 +2,7 @@ pub mod app_view;
 pub mod container_detail;
 pub mod container_list;
 pub mod image_icon;
+pub mod json_view;
 pub mod logs_view;
 pub mod native;
 pub mod quit;
@@ -67,25 +68,6 @@ pub const SNAPPY_SPRING: SpringConfig = SpringConfig::new(700., 53., 1.);
 /// move the text next to them.
 pub fn tabular_nums() -> FontFeatures {
     FontFeatures(Arc::new(vec![("tnum".into(), 1)]))
-}
-
-/// A line of monospace text that wraps in the space it gets. The wrapped
-/// rows start at the indent of the first row, so nested data keeps its
-/// shape.
-pub fn code_line(text: SharedString) -> Div {
-    let body = text.trim_start_matches([' ', '\t']);
-    let indent = text.len() - body.len();
-    let row = div().flex().flex_1().min_w_0().items_start();
-    if indent == 0 {
-        return row.child(div().flex_1().min_w_0().child(text));
-    }
-    row.child(
-        div()
-            .flex_shrink_0()
-            .whitespace_nowrap()
-            .child(SharedString::from(text[..indent].to_string())),
-    )
-    .child(div().flex_1().min_w_0().child(SharedString::from(body.to_string())))
 }
 
 /// A spinner that turns at a constant speed. The default easing of
