@@ -2,7 +2,6 @@
 
 use std::ops::Range;
 use std::rc::Rc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
@@ -20,7 +19,7 @@ use crate::state::volume_store::VolumeStore;
 use crate::ui::json_view::{self, Json};
 use crate::ui::key_nav::{self, DetailKeys, KeyNav, Move};
 use crate::ui::container_detail::{card, field, list_row, loading, section, segmented_control};
-use crate::ui::{ENTER_DURATION, NATIVE_BUTTON_HEIGHT, TOOLBAR_HEIGHT, drag_area, native, tabular_nums, text, toast};
+use crate::ui::{ENTER_DURATION, NATIVE_BUTTON_HEIGHT, TOOLBAR_HEIGHT, ago, drag_area, native, tabular_nums, text, toast};
 use crate::ui::toast::Toast;
 
 const FILE_ROW_HEIGHT: f32 = 30.;
@@ -700,25 +699,6 @@ impl VolumeDetail {
     }
 }
 
-/// A time as words, for example "3 days ago". `secs` is the time in seconds
-/// since the Unix epoch.
-fn ago(secs: i64) -> String {
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
-    ago_from(now - secs)
-}
-
-fn ago_from(delta: i64) -> String {
-    let unit = |n: i64, word: &str| format!("{n} {word}{} ago", if n == 1 { "" } else { "s" });
-    match delta.max(0) {
-        d if d < 60 => "Just now".into(),
-        d if d < 3_600 => unit(d / 60, "minute"),
-        d if d < 86_400 => unit(d / 3_600, "hour"),
-        d if d < 2_592_000 => unit(d / 86_400, "day"),
-        d if d < 31_536_000 => unit(d / 2_592_000, "month"),
-        d => unit(d / 31_536_000, "year"),
-    }
-}
-
 impl Render for VolumeDetail {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.nav.begin(window);
@@ -830,20 +810,5 @@ impl Render for VolumeDetail {
             )
             .children(header)
             .child(div().flex_1().min_h_0().child(body))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::ago_from;
-
-    #[test]
-    fn times_read_as_words() {
-        assert_eq!(ago_from(5), "Just now");
-        assert_eq!(ago_from(-5), "Just now");
-        assert_eq!(ago_from(60), "1 minute ago");
-        assert_eq!(ago_from(7_200), "2 hours ago");
-        assert_eq!(ago_from(86_400 * 3), "3 days ago");
-        assert_eq!(ago_from(31_536_000 * 2), "2 years ago");
     }
 }

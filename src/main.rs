@@ -33,6 +33,7 @@ fn main() {
             ui::app_view::bind_keys(cx);
             ui::container_list::bind_keys(cx);
             ui::volume_list::bind_keys(cx);
+            ui::image_list::bind_keys(cx);
             ui::native::set_app_icon();
             ui::native::init_menus(cx);
             ui::quit::init(cx);

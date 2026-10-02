@@ -4,6 +4,7 @@ pub mod ansi;
 pub mod containers;
 pub mod events;
 pub mod image_logo;
+pub mod images;
 pub mod logs;
 pub mod stats;
 pub mod volumes;
@@ -171,6 +172,32 @@ mod live_tests {
         docker_cli(&["rm", "-f", "cgui-tail"]);
         assert_eq!(lines.len(), logs::TAIL_LINES);
         assert_eq!(lines.last().unwrap().text, "5000");
+    }
+
+    #[tokio::test]
+    #[ignore = "needs a running Docker engine and the network"]
+    async fn pull_then_read_an_image() {
+        let docker = client().await;
+        let mut progress = images::PullProgress::default();
+        let mut s = std::pin::pin!(images::pull(&docker, "hello-world:latest"));
+        while let Some(item) = s.next().await {
+            progress.apply(&item.expect("the pull must not fail"));
+        }
+        assert!(progress.status.is_some_and(|s| s.starts_with("Status:")));
+        let rows = images::list_all(&docker).await.unwrap();
+        let row = rows.iter().find(|r| r.tags.iter().any(|t| t == "hello-world:latest")).unwrap();
+        assert!(row.size > 0);
+        assert!(!images::history(&docker, &row.id).await.unwrap().is_empty());
+        let info = images::inspect(&docker, &row.id).await.unwrap();
+        assert_eq!(info.command.as_deref(), Some("/hello"));
+        assert!(info.platform.is_some_and(|p| p.starts_with("linux/")));
+        // A pull of a name that does not exist ends with the engine message.
+        let errors: Vec<String> = images::pull(&docker, "cgui-missing/nothing:none")
+            .filter_map(|r| async move { r.err() })
+            .collect()
+            .await;
+        assert_eq!(errors.len(), 1);
+        assert!(!errors[0].starts_with("Docker stream error"));
     }
 
     #[tokio::test]

@@ -50,7 +50,7 @@ actions!(
 
 /// The key context of the sidebar.
 pub const SIDEBAR: &str = "Sidebar";
-/// The key context that the container and volume lists add.
+/// The key context that the container, volume, and image lists add.
 pub const LIST: &str = "NavList";
 /// The key context of the detail panes.
 pub const DETAIL: &str = "DetailPane";
@@ -688,6 +688,13 @@ impl KeyNav {
     pub fn row(&self, row: Stateful<Div>, handler: NavHandler, cx: &App) -> Stateful<Div> {
         let (ix, on) = self.push(handler.clone());
         self.follow_pointer(row, ix, on, cx).on_click(move |_, window, cx| handler(window, cx))
+    }
+
+    /// Adds a row that has its own click action, for example the trigger
+    /// of a popover. Return does `handler`.
+    pub fn row_with_own_click(&self, row: Stateful<Div>, handler: NavHandler, cx: &App) -> Stateful<Div> {
+        let (ix, on) = self.push(handler);
+        self.follow_pointer(row, ix, on, cx)
     }
 
     /// Adds a button. A disabled button takes no cursor. The cursor button

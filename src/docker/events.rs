@@ -15,6 +15,8 @@ pub enum EngineEvent {
     /// A volume was created, deleted, or pruned. The mount and unmount
     /// actions are skipped, because the container rows show the mounts.
     Volume,
+    /// An image was pulled, tagged, untagged, or deleted.
+    Image,
     /// The stream (re)connected. The store must reload the full list.
     Resync,
     /// The engine does not answer. The stream tries again with backoff.
@@ -36,7 +38,7 @@ impl EngineEvent {
 const MIN_BACKOFF: Duration = Duration::from_millis(500);
 const MAX_BACKOFF: Duration = Duration::from_secs(2);
 
-/// Reads container and volume events until `tx` closes. If the stream ends, it connects
+/// Reads container, volume, and image events until `tx` closes. If the stream ends, it connects
 /// again with backoff (0.5 s to 2 s) and sends `Resync`.
 pub async fn pump(docker: Docker, tx: async_channel::Sender<EngineEvent>) {
     let mut backoff = MIN_BACKOFF;
@@ -69,7 +71,7 @@ pub async fn pump(docker: Docker, tx: async_channel::Sender<EngineEvent>) {
             since: Some(since.to_string()),
             filters: Some(HashMap::from([(
                 "type".to_string(),
-                vec!["container".to_string(), "volume".to_string()],
+                vec!["container".to_string(), "volume".to_string(), "image".to_string()],
             )])),
             ..Default::default()
         };
@@ -83,6 +85,15 @@ pub async fn pump(docker: Docker, tx: async_channel::Sender<EngineEvent>) {
             if msg.typ == Some(EventMessageTypeEnum::VOLUME) {
                 if matches!(action.as_str(), "create" | "destroy" | "prune")
                     && tx.send(EngineEvent::Volume).await.is_err()
+                {
+                    return;
+                }
+                continue;
+            }
+            if msg.typ == Some(EventMessageTypeEnum::IMAGE) {
+                // A push or a save does not change the list.
+                if !matches!(action.as_str(), "push" | "save")
+                    && tx.send(EngineEvent::Image).await.is_err()
                 {
                     return;
                 }

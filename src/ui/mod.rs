@@ -1,6 +1,8 @@
 pub mod app_view;
 pub mod container_detail;
 pub mod container_list;
+pub mod image_detail;
+pub mod image_list;
 pub mod image_icon;
 pub mod json_view;
 pub mod key_nav;
@@ -128,4 +130,38 @@ pub fn drag_area(id: impl Into<ElementId>) -> Stateful<Div> {
                 window.titlebar_double_click();
             }
         })
+}
+
+/// A time as words, for example "3 days ago". `secs` is the time in seconds
+/// since the Unix epoch.
+pub fn ago(secs: i64) -> String {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+    ago_from(now - secs)
+}
+
+fn ago_from(delta: i64) -> String {
+    let unit = |n: i64, word: &str| format!("{n} {word}{} ago", if n == 1 { "" } else { "s" });
+    match delta.max(0) {
+        d if d < 60 => "Just now".into(),
+        d if d < 3_600 => unit(d / 60, "minute"),
+        d if d < 86_400 => unit(d / 3_600, "hour"),
+        d if d < 2_592_000 => unit(d / 86_400, "day"),
+        d if d < 31_536_000 => unit(d / 2_592_000, "month"),
+        d => unit(d / 31_536_000, "year"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ago_from;
+
+    #[test]
+    fn times_read_as_words() {
+        assert_eq!(ago_from(5), "Just now");
+        assert_eq!(ago_from(-5), "Just now");
+        assert_eq!(ago_from(60), "1 minute ago");
+        assert_eq!(ago_from(7_200), "2 hours ago");
+        assert_eq!(ago_from(86_400 * 3), "3 days ago");
+        assert_eq!(ago_from(31_536_000 * 2), "2 years ago");
+    }
 }

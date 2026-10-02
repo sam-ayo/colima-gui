@@ -62,6 +62,8 @@ pub enum DetailEvent {
     Error(String),
     /// Show a volume in the volume list.
     RevealVolume(String),
+    /// Show an image in the image list. The value is the image ID.
+    RevealImage(String),
 }
 
 struct Loaded {
@@ -350,6 +352,25 @@ impl ContainerDetail {
         let mono = t.mono_font_family.clone();
         let muted = t.muted_foreground;
 
+        let image_id = row.image_id.clone();
+        // A click on the image shows it in the image list.
+        let image = div().child(
+            self.nav.row(
+                field(
+                    "Image",
+                    h_flex()
+                        .gap_1()
+                        .child(div().flex_1().min_w_0().truncate().font_family(mono.clone()).child(row.image.clone()))
+                        .child(Icon::new(IconName::ChevronRight).xsmall().text_color(muted)),
+                    cx,
+                )
+                .id("show-image")
+                .cursor_pointer()
+                .tooltip(|window, cx| gpui_component::tooltip::Tooltip::new("Show in Images").build(window, cx)),
+                key_nav::handler(cx, move |_, _, cx| cx.emit(DetailEvent::RevealImage(image_id.clone()))),
+                cx,
+            ),
+        );
         let summary = card(
             [
                 field(
@@ -357,6 +378,7 @@ impl ContainerDetail {
                 div().font_family(mono.clone()).child(row.short_id().to_string()),
                 cx,
             ),
+            image,
             field(
                 "IP address",
                 div().font_family(mono.clone()).child(

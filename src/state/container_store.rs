@@ -84,6 +84,8 @@ pub struct EventPlan {
     pub remove: Vec<String>,
     /// A volume was created or deleted.
     pub volumes: bool,
+    /// An image was pulled, tagged, untagged, or deleted.
+    pub images: bool,
 }
 
 pub fn plan_events(batch: &[EngineEvent]) -> EventPlan {
@@ -105,6 +107,7 @@ pub fn plan_events(batch: &[EngineEvent]) -> EventPlan {
                 plan.resync = true;
             }
             EngineEvent::Volume => plan.volumes = true,
+            EngineEvent::Image => plan.images = true,
             EngineEvent::Container { id, action } => {
                 if action == "destroy" {
                     plan.remove.push(id.clone());
@@ -235,6 +238,9 @@ pub enum StoreEvent {
     /// The volume list is out of date: a volume event came, or the event
     /// stream connected again.
     VolumesChanged,
+    /// The image list is out of date: an image event came, or the event
+    /// stream connected again.
+    ImagesChanged,
     Error(String),
 }
 
@@ -433,6 +439,9 @@ impl ContainerStore {
         }
         if plan.volumes || plan.resync {
             cx.emit(StoreEvent::VolumesChanged);
+        }
+        if plan.images || plan.resync {
+            cx.emit(StoreEvent::ImagesChanged);
         }
         let mut changed = plan.link.is_some();
         for id in &plan.remove {
@@ -639,6 +648,7 @@ mod tests {
             id: id.into(),
             name: name.into(),
             image: "nginx".into(),
+            image_id: String::new(),
             state,
             status: String::new(),
             ports: Vec::new(),
@@ -685,6 +695,8 @@ mod tests {
         assert!(plan.volumes);
         assert_eq!(plan.refresh, vec!["a".to_string()]);
         assert!(!plan_events(&[ev("a", "start")]).volumes);
+        assert!(plan_events(&[EngineEvent::Image]).images);
+        assert!(!plan_events(&[EngineEvent::Volume]).images);
     }
 
     #[test]

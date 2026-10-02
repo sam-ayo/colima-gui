@@ -190,7 +190,7 @@ impl VolumeStore {
                     this.reload(cx);
                 }
             }
-            StoreEvent::Error(_) => {}
+            StoreEvent::ImagesChanged | StoreEvent::Error(_) => {}
         })];
         VolumeStore {
             containers,
@@ -452,6 +452,7 @@ mod tests {
             id: id.into(),
             name: id.into(),
             image: String::new(),
+            image_id: String::new(),
             state: State::Running,
             status: String::new(),
             ports: Vec::new(),

@@ -1,5 +1,5 @@
-//! The root view: the sidebar, the container or volume list, and the
-//! detail pane.
+//! The root view: the sidebar, the container, volume, or image list, and
+//! the detail pane.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -14,11 +14,14 @@ use gpui_kit_assets::IconName;
 use crate::colima::{self, MachineAction};
 use crate::docker::EngineStatus;
 use crate::state::container_store::{ContainerStore, StoreEvent};
+use crate::state::image_store::{ImageEvent, ImageStore};
 use crate::state::machine_store::{MachineEvent, MachineStore};
 use crate::state::stats_store::StatsStore;
 use crate::state::volume_store::{VolumeEvent, VolumeStore};
 use crate::ui::container_detail::{ContainerDetail, DetailEvent};
 use crate::ui::container_list::{ContainerList, ListEvent};
+use crate::ui::image_detail::{ImageDetail, ImageDetailEvent};
+use crate::ui::image_list::{ImageList, ImageListEvent};
 use crate::ui::key_nav::{self, Move};
 use crate::ui::sidebar::{Section, Sidebar};
 use crate::ui::toast::{Toast, Toaster};
@@ -158,8 +161,11 @@ pub struct AppView {
     list: Entity<ContainerList>,
     volumes: Entity<VolumeStore>,
     volume_list: Entity<VolumeList>,
+    images: Entity<ImageStore>,
+    image_list: Entity<ImageList>,
     detail: Option<Entity<ContainerDetail>>,
     volume_detail: Option<Entity<VolumeDetail>>,
+    image_detail: Option<Entity<ImageDetail>>,
     /// The detail pane that goes out after a click on its close button.
     /// It stays until the spring closes it.
     closing_detail: Option<AnyView>,
@@ -218,6 +224,7 @@ pub struct AppView {
     _subs: Vec<Subscription>,
     _detail_sub: Option<Subscription>,
     _volume_detail_sub: Option<Subscription>,
+    _image_detail_sub: Option<Subscription>,
 }
 
 impl AppView {
@@ -228,6 +235,8 @@ impl AppView {
         let list = cx.new(|cx| ContainerList::new(store.clone(), stats.clone(), window, cx));
         let volumes = cx.new(|cx| VolumeStore::new(store.clone(), cx));
         let volume_list = cx.new(|cx| VolumeList::new(volumes.clone(), store.clone(), window, cx));
+        let images = cx.new(|cx| ImageStore::new(store.clone(), cx));
+        let image_list = cx.new(|cx| ImageList::new(images.clone(), store.clone(), window, cx));
         let handle = window.window_handle();
         let status_menu = cx.new(|cx| StatusMenu::new(store.clone(), handle, cx));
         let subs = vec![
@@ -261,13 +270,14 @@ impl AppView {
                 StoreEvent::Error(msg) => {
                     toast::show(Toast::error(msg.clone()), cx)
                 }
-                StoreEvent::VolumesChanged => {}
+                StoreEvent::VolumesChanged | StoreEvent::ImagesChanged => {}
                 StoreEvent::Changed => {
                     let status = this.store.read(cx).status.clone();
                     // Close the detail pane when the engine goes away.
                     if status != EngineStatus::Connected {
                         this.close_pane(Section::Containers, false, cx);
                         this.close_pane(Section::Volumes, false, cx);
+                        this.close_pane(Section::Images, false, cx);
                     }
                     if std::mem::discriminant(&status) != std::mem::discriminant(&this.engine_status) {
                         this.engine_status = status;
@@ -312,6 +322,41 @@ impl AppView {
                     this.close_pane(Section::Volumes, *pointer, cx)
                 }
             }),
+            cx.subscribe_in(&images, window, |this, _, ev: &ImageEvent, window, cx| match ev {
+                ImageEvent::Pulled(reference) => {
+                    toast::show(Toast::success(format!("Pulled {reference}")), cx);
+                    // Select the new image only in the image list, so a pull
+                    // does not take the selection of a different section.
+                    if this.section == Section::Images {
+                        this.image_list.update(cx, |l, cx| l.reveal(reference, cx));
+                        this.image_list.focus_handle(cx).focus(window, cx);
+                    }
+                }
+                ImageEvent::Error(msg) => {
+                    toast::show(Toast::error(msg.clone()), cx)
+                }
+                ImageEvent::Pruned(count, bytes) => {
+                    let noun = if *count == 1 { "image" } else { "images" };
+                    let msg = if *count == 0 {
+                        "No images were unused.".to_string()
+                    } else {
+                        format!(
+                            "Removed {count} {noun}. {} is free.",
+                            crate::docker::stats::format_bytes(*bytes)
+                        )
+                    };
+                    toast::show(Toast::success(msg), cx)
+                }
+            }),
+            cx.subscribe_in(&image_list, window, |this, _, ev: &ImageListEvent, window, cx| match ev {
+                ImageListEvent::RevealContainer(id) => this.reveal_container(id, window, cx),
+                ImageListEvent::Selected { key: Some(key), pointer } => {
+                    this.open_image_detail(key.clone(), *pointer, window, cx)
+                }
+                ImageListEvent::Selected { key: None, pointer } => {
+                    this.close_pane(Section::Images, *pointer, cx)
+                }
+            }),
             cx.subscribe_in(&list, window, |this, _, ev: &ListEvent, window, cx| match ev {
                 ListEvent::Selected { id: Some(id), pointer } => {
                     this.open_detail(id.clone(), *pointer, window, cx)
@@ -330,8 +375,11 @@ impl AppView {
             list,
             volumes,
             volume_list,
+            images,
+            image_list,
             detail: None,
             volume_detail: None,
+            image_detail: None,
             closing_detail: None,
             detail_spring: SpringState { position: 0., velocity: 0. },
             detail_stepped_at: None,
@@ -360,6 +408,7 @@ impl AppView {
             _subs: subs,
             _detail_sub: None,
             _volume_detail_sub: None,
+            _image_detail_sub: None,
         }
     }
 
@@ -369,6 +418,7 @@ impl AppView {
         match self.section {
             Section::Containers => self.list.focus_handle(cx).focus(window, cx),
             Section::Volumes => self.volume_list.focus_handle(cx).focus(window, cx),
+            Section::Images => self.image_list.focus_handle(cx).focus(window, cx),
             _ => self.focus_sidebar(window, cx),
         }
     }
@@ -393,6 +443,11 @@ impl AppView {
             }
             Section::Volumes => {
                 if let Some(d) = &self.volume_detail {
+                    d.update(cx, |d, cx| d.focus_in(window, cx));
+                }
+            }
+            Section::Images => {
+                if let Some(d) = &self.image_detail {
                     d.update(cx, |d, cx| d.focus_in(window, cx));
                 }
             }
@@ -450,6 +505,11 @@ impl AppView {
                     d.update(cx, |d, cx| d.cycle_tab(delta, cx));
                 }
             }
+            Section::Images => {
+                if let Some(d) = &self.image_detail {
+                    d.update(cx, |d, cx| d.cycle_tab(delta, cx));
+                }
+            }
             _ => {}
         }
     }
@@ -468,6 +528,11 @@ impl AppView {
                     d.update(cx, |d, cx| d.set_tab_at(ix, cx));
                 }
             }
+            Section::Images => {
+                if let Some(d) = &self.image_detail {
+                    d.update(cx, |d, cx| d.set_tab_at(ix, cx));
+                }
+            }
             _ => {}
         }
     }
@@ -477,6 +542,9 @@ impl AppView {
         self.section = section;
         if section == Section::Volumes {
             self.volumes.update(cx, |v, cx| v.activate(cx));
+        }
+        if section == Section::Images {
+            self.images.update(cx, |i, cx| i.activate(cx));
         }
         self.focus_list(window, cx);
         if section != Section::Volumes {
@@ -496,6 +564,7 @@ impl AppView {
         match self.section {
             Section::Containers => self.detail.clone().map(Into::into),
             Section::Volumes => self.volume_detail.clone().map(Into::into),
+            Section::Images => self.image_detail.clone().map(Into::into),
             _ => None,
         }
     }
@@ -599,6 +668,9 @@ impl AppView {
         }
         if self.volume_list.read(cx).leading_inset() != inset {
             self.volume_list.update(cx, |l, cx| l.set_leading_inset(inset, cx));
+        }
+        if self.image_list.read(cx).leading_inset() != inset {
+            self.image_list.update(cx, |l, cx| l.set_leading_inset(inset, cx));
         }
         width
     }
@@ -744,6 +816,7 @@ impl AppView {
         match section {
             Section::Containers => self.list.update(cx, |l, cx| l.clear_selection(cx)),
             Section::Volumes => self.volume_list.update(cx, |l, cx| l.clear_selection(cx)),
+            Section::Images => self.image_list.update(cx, |l, cx| l.clear_selection(cx)),
             _ => {}
         }
     }
@@ -964,6 +1037,10 @@ impl AppView {
                     this.set_section(Section::Volumes, window, cx);
                     this.volume_list.update(cx, |l, cx| l.reveal(name, cx));
                 }
+                DetailEvent::RevealImage(id) => {
+                    this.set_section(Section::Images, window, cx);
+                    this.image_list.update(cx, |l, cx| l.reveal(id, cx));
+                }
             }
         }));
         self.detail = Some(detail);
@@ -985,6 +1062,13 @@ impl AppView {
             Section::Volumes => match self.volume_detail.take() {
                 Some(d) => {
                     self._volume_detail_sub = None;
+                    d.into()
+                }
+                None => return,
+            },
+            Section::Images => match self.image_detail.take() {
+                Some(d) => {
+                    self._image_detail_sub = None;
                     d.into()
                 }
                 None => return,
@@ -1028,6 +1112,33 @@ impl AppView {
             },
         ));
         self.volume_detail = Some(detail);
+        cx.notify();
+    }
+
+    fn open_image_detail(&mut self, key: String, pointer: bool, window: &mut Window, cx: &mut Context<Self>) {
+        // The pane moves as the container pane does. See `open_detail`.
+        self.closing_detail = None;
+        if let Some(width) = self.detail_restore_width.take() {
+            self.detail_width = width;
+        }
+        if !pointer {
+            self.detail_spring = SpringState { position: 1., velocity: 0. };
+        }
+        let tab = self.image_detail.as_ref().map(|d| d.read(cx).tab()).unwrap_or_default();
+        let (images, store) = (self.images.clone(), self.store.clone());
+        let detail = cx.new(|cx| ImageDetail::new(key, images, store, tab, cx));
+        self._image_detail_sub = Some(cx.subscribe_in(
+            &detail,
+            window,
+            |this, _, ev: &ImageDetailEvent, window, cx| match ev {
+                ImageDetailEvent::Close => this.image_list.update(cx, |l, cx| l.clear_selection(cx)),
+                ImageDetailEvent::RevealContainer(id) => this.reveal_container(id, window, cx),
+                ImageDetailEvent::Remove(key) => {
+                    this.image_list.update(cx, |l, cx| l.request_remove(key.clone(), window, cx))
+                }
+            },
+        ));
+        self.image_detail = Some(detail);
         cx.notify();
     }
 
@@ -1187,10 +1298,10 @@ impl Render for AppView {
         } else if let Some(state) = self.render_engine_state(cx) {
             with_drag_area(state)
         } else {
-            let list: AnyView = if self.section == Section::Volumes {
-                self.volume_list.clone().into()
-            } else {
-                self.list.clone().into()
+            let list: AnyView = match self.section {
+                Section::Volumes => self.volume_list.clone().into(),
+                Section::Images => self.image_list.clone().into(),
+                _ => self.list.clone().into(),
             };
             let pane = self.pane();
             let open = pane.is_some();

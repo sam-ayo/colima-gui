@@ -65,7 +65,7 @@ impl Section {
 
     /// The sections that exist now. The others show a placeholder.
     pub fn is_available(self) -> bool {
-        matches!(self, Section::Containers | Section::Volumes)
+        matches!(self, Section::Containers | Section::Volumes | Section::Images)
     }
 }
 
