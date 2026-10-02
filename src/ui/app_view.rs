@@ -19,6 +19,7 @@ use crate::state::stats_store::StatsStore;
 use crate::state::volume_store::{VolumeEvent, VolumeStore};
 use crate::ui::container_detail::{ContainerDetail, DetailEvent};
 use crate::ui::container_list::{ContainerList, ListEvent};
+use crate::ui::key_nav::{self, Move};
 use crate::ui::sidebar::{Section, Sidebar};
 use crate::ui::toast::{Toast, Toaster};
 use crate::ui::status_menu::{StatusMenu, StatusMenuEvent};
@@ -29,7 +30,22 @@ use crate::ui::{
     ENTER_DURATION, SIDEBAR_INSET, SIDEBAR_WIDTH, TOOLBAR_HEIGHT, delayed_reveal, drag_area, spinner,
 };
 
-actions!(app_view, [ToggleSidebar]);
+actions!(
+    app_view,
+    [
+        ToggleSidebar,
+        SelectTab1,
+        SelectTab2,
+        SelectTab3,
+        SelectTab4,
+        ShowContainers,
+        ShowVolumes,
+        ShowImages,
+        ShowNetworks,
+        ShowPods,
+        ShowServices
+    ]
+);
 
 const SIDEBAR_MIN_WIDTH: f32 = 180.;
 const SIDEBAR_MAX_WIDTH: f32 = 360.;
@@ -88,6 +104,24 @@ const DETAIL_SPRING_EPSILON: f32 = 0.001;
 pub fn bind_keys(cx: &mut App) {
     // The standard macOS shortcut for "Show Sidebar" and "Hide Sidebar".
     cx.bind_keys([KeyBinding::new("cmd-ctrl-s", ToggleSidebar, None)]);
+    // The number keys show the tabs of the detail pane. A text field takes
+    // the keys as text, so the bindings do not apply in a field.
+    cx.bind_keys([
+        KeyBinding::new("1", SelectTab1, Some("!Input")),
+        KeyBinding::new("2", SelectTab2, Some("!Input")),
+        KeyBinding::new("3", SelectTab3, Some("!Input")),
+        KeyBinding::new("4", SelectTab4, Some("!Input")),
+    ]);
+    // Command and a number show a section, in the order of the sidebar, as
+    // in the Finder and Mail.
+    cx.bind_keys([
+        KeyBinding::new("cmd-1", ShowContainers, None),
+        KeyBinding::new("cmd-2", ShowVolumes, None),
+        KeyBinding::new("cmd-3", ShowImages, None),
+        KeyBinding::new("cmd-4", ShowNetworks, None),
+        KeyBinding::new("cmd-5", ShowPods, None),
+        KeyBinding::new("cmd-6", ShowServices, None),
+    ]);
 }
 
 /// The value of a sidebar resize drag.
@@ -147,6 +181,13 @@ pub struct AppView {
     /// width while it goes out, so it does not jump.
     detail_restore_width: Option<Option<Pixels>>,
     section: Section,
+    /// The focus of the sidebar. The arrow keys then move `sidebar_cursor`
+    /// through the sections and the machines.
+    sidebar_focus: FocusHandle,
+    sidebar_cursor: usize,
+    /// The bounds of the sidebar row at the cursor, for a context menu that
+    /// a key opens.
+    sidebar_bounds: key_nav::BoundsCell,
     /// The width of the sidebar panel that the user set, without the inset
     /// around it. A narrow window can show the panel narrower.
     sidebar_width: Pixels,
@@ -299,6 +340,9 @@ impl AppView {
             detail_drag_start: None,
             detail_restore_width: None,
             section: Section::Containers,
+            sidebar_focus: cx.focus_handle().tab_stop(true),
+            sidebar_cursor: 0,
+            sidebar_bounds: key_nav::BoundsCell::default(),
             sidebar_width: px(SIDEBAR_WIDTH),
             sidebar_collapsed: false,
             sidebar_spring: SpringState {
@@ -320,12 +364,111 @@ impl AppView {
     }
 
     /// Moves the focus to the list of the current section. A section with
-    /// no list takes the focus from all elements.
-    fn focus_list(&self, window: &mut Window, cx: &mut Context<Self>) {
+    /// no list gives the focus to the sidebar, so the keys still work.
+    fn focus_list(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.section {
             Section::Containers => self.list.focus_handle(cx).focus(window, cx),
             Section::Volumes => self.volume_list.focus_handle(cx).focus(window, cx),
-            _ => window.blur(cx),
+            _ => self.focus_sidebar(window, cx),
+        }
+    }
+
+    /// Moves the focus to the sidebar, with the cursor on the current
+    /// section. A collapsed sidebar opens.
+    fn focus_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_sidebar_collapsed(false, cx);
+        self.sidebar_cursor = Section::ALL.iter().position(|&s| s == self.section).unwrap_or(0);
+        self.sidebar_focus.focus(window, cx);
+        cx.notify();
+    }
+
+    /// Moves the focus into the detail pane of the current section, if a
+    /// pane is open.
+    fn focus_detail(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.section {
+            Section::Containers => {
+                if let Some(d) = &self.detail {
+                    d.update(cx, |d, cx| d.focus_in(window, cx));
+                }
+            }
+            Section::Volumes => {
+                if let Some(d) = &self.volume_detail {
+                    d.update(cx, |d, cx| d.focus_in(window, cx));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The number of sidebar rows: the sections, then the machines.
+    fn sidebar_rows(&self, cx: &App) -> usize {
+        Section::ALL.len() + self.machines.read(cx).machines.len()
+    }
+
+    fn move_sidebar(&mut self, m: Move, cx: &mut Context<Self>) {
+        if let Some(ix) = m.apply(Some(self.sidebar_cursor), self.sidebar_rows(cx)) {
+            self.sidebar_cursor = ix;
+            cx.notify();
+        }
+    }
+
+    /// The name of the machine at the sidebar cursor.
+    fn machine_at_cursor(&self, cx: &App) -> Option<String> {
+        let ix = self.sidebar_cursor.checked_sub(Section::ALL.len())?;
+        self.machines.read(cx).machines.get(ix).map(|m| m.name.clone())
+    }
+
+    /// Does the action of a click on the sidebar row at the cursor. A
+    /// section shows, and its list gets the focus. A machine shows its
+    /// containers.
+    fn activate_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(&section) = Section::ALL.get(self.sidebar_cursor) {
+            self.set_section(section, window, cx);
+        } else if let Some(name) = self.machine_at_cursor(cx) {
+            self.open_machine(&name, cx);
+        }
+    }
+
+    fn show_sidebar_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(name) = self.machine_at_cursor(cx) {
+            let at = key_nav::menu_point(self.sidebar_bounds.get());
+            self.show_machine_menu(&name, at, window, cx);
+        }
+    }
+
+    /// Shows the next tab of the detail pane, or the previous tab for a
+    /// negative `delta`. The tabs wrap around.
+    fn cycle_detail_tab(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
+        match self.section {
+            Section::Containers => {
+                if let Some(d) = &self.detail {
+                    d.update(cx, |d, cx| d.cycle_tab(delta, window, cx));
+                }
+            }
+            Section::Volumes => {
+                if let Some(d) = &self.volume_detail {
+                    d.update(cx, |d, cx| d.cycle_tab(delta, cx));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Shows the tab at a position, from 0, in the detail pane of the
+    /// current section.
+    fn set_detail_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        match self.section {
+            Section::Containers => {
+                if let Some(d) = &self.detail {
+                    d.update(cx, |d, cx| d.set_tab_at(ix, window, cx));
+                }
+            }
+            Section::Volumes => {
+                if let Some(d) = &self.volume_detail {
+                    d.update(cx, |d, cx| d.set_tab_at(ix, cx));
+                }
+            }
+            _ => {}
         }
     }
 
@@ -643,7 +786,7 @@ impl AppView {
 
     /// Shows the actions of a Colima profile. They are the `colima`
     /// commands for one profile.
-    fn show_machine_menu(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+    fn show_machine_menu(&mut self, name: &str, at: Option<Point<Pixels>>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(machine) = self.machines.read(cx).machines.iter().find(|m| m.name == name).cloned() else {
             return;
         };
@@ -705,7 +848,7 @@ impl AppView {
         entries.push(separator());
         entries.push(item("Delete…", idle, action(MachineAction::Delete)));
         let (entries, handlers): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
-        native::show_context_menu(entries, window, cx, move |this, ix, window, cx| {
+        native::show_context_menu_at(entries, at, window, cx, move |this, ix, window, cx| {
             if let Some(Some(handler)) = handlers.get(ix) {
                 handler(this, window, cx);
             }
@@ -1006,6 +1149,7 @@ impl Render for AppView {
         let machines = self.machines.read(cx);
         let open_view = view.clone();
         let menu_view = view.clone();
+        let hover_view = view.clone();
         let sidebar = Sidebar::new(self.section, sidebar_width, move |section, window, cx| {
             let _ = view.update(cx, |this, cx| this.set_section(section, window, cx));
         })
@@ -1017,7 +1161,19 @@ impl Render for AppView {
                 let _ = open_view.update(cx, |this, cx| this.open_machine(name, cx));
             },
             move |name, window, cx| {
-                let _ = menu_view.update(cx, |this, cx| this.show_machine_menu(name, window, cx));
+                let _ = menu_view.update(cx, |this, cx| this.show_machine_menu(name, None, window, cx));
+            },
+        )
+        .cursor(
+            self.sidebar_focus.is_focused(window).then_some(self.sidebar_cursor),
+            self.sidebar_bounds.clone(),
+            move |ix, _, cx| {
+                let _ = hover_view.update(cx, |this, cx| {
+                    if this.sidebar_cursor != ix {
+                        this.sidebar_cursor = ix;
+                        cx.notify();
+                    }
+                });
             },
         );
 
@@ -1139,7 +1295,25 @@ impl Render for AppView {
             .flex_shrink_0()
             .overflow_hidden()
             .w(sidebar_area)
-            .child(div().absolute().top_0().right_0().h_full().child(sidebar))
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .right_0()
+                    .h_full()
+                    .key_context(key_nav::SIDEBAR)
+                    .track_focus(&self.sidebar_focus)
+                    .on_action(cx.listener(|this, _: &key_nav::MoveUp, _, cx| this.move_sidebar(Move::By(-1), cx)))
+                    .on_action(cx.listener(|this, _: &key_nav::MoveDown, _, cx| this.move_sidebar(Move::By(1), cx)))
+                    .on_action(cx.listener(|this, _: &key_nav::MoveFirst, _, cx| this.move_sidebar(Move::First, cx)))
+                    .on_action(cx.listener(|this, _: &key_nav::MoveLast, _, cx| this.move_sidebar(Move::Last, cx)))
+                    .on_action(cx.listener(|this, _: &key_nav::PageUp, _, cx| this.move_sidebar(Move::First, cx)))
+                    .on_action(cx.listener(|this, _: &key_nav::PageDown, _, cx| this.move_sidebar(Move::Last, cx)))
+                    .on_action(cx.listener(|this, _: &key_nav::Activate, w, cx| this.activate_sidebar(w, cx)))
+                    .on_action(cx.listener(|this, _: &key_nav::MoveRight, w, cx| this.focus_list(w, cx)))
+                    .on_action(cx.listener(|this, _: &key_nav::ShowMenu, w, cx| this.show_sidebar_menu(w, cx)))
+                    .child(sidebar),
+            )
             .when(!self.sidebar_collapsed, |d| {
                 d.child(
                     div()
@@ -1167,7 +1341,28 @@ impl Render for AppView {
             .size_full()
             .text_size(px(text::BODY))
             .text_color(t.foreground)
+            // The window has no focus after some clicks. The context keeps
+            // the "!Input" bindings active then, because a binding needs a
+            // context to match.
+            .key_context("AppView")
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
+            .on_action(cx.listener(|this, _: &SelectTab1, w, cx| this.set_detail_tab(0, w, cx)))
+            .on_action(cx.listener(|this, _: &SelectTab2, w, cx| this.set_detail_tab(1, w, cx)))
+            .on_action(cx.listener(|this, _: &SelectTab3, w, cx| this.set_detail_tab(2, w, cx)))
+            .on_action(cx.listener(|this, _: &SelectTab4, w, cx| this.set_detail_tab(3, w, cx)))
+            .on_action(cx.listener(|this, _: &key_nav::NextTab, w, cx| this.cycle_detail_tab(1, w, cx)))
+            .on_action(cx.listener(|this, _: &key_nav::PrevTab, w, cx| this.cycle_detail_tab(-1, w, cx)))
+            .on_action(cx.listener(|_, _: &key_nav::FocusNext, w, cx| w.focus_next(cx)))
+            .on_action(cx.listener(|_, _: &key_nav::FocusPrev, w, cx| w.focus_prev(cx)))
+            .on_action(cx.listener(|this, _: &key_nav::FocusSidebar, w, cx| this.focus_sidebar(w, cx)))
+            .on_action(cx.listener(|this, _: &key_nav::FocusList, w, cx| this.focus_list(w, cx)))
+            .on_action(cx.listener(|this, _: &key_nav::FocusDetail, w, cx| this.focus_detail(w, cx)))
+            .on_action(cx.listener(|this, _: &ShowContainers, w, cx| this.set_section(Section::Containers, w, cx)))
+            .on_action(cx.listener(|this, _: &ShowVolumes, w, cx| this.set_section(Section::Volumes, w, cx)))
+            .on_action(cx.listener(|this, _: &ShowImages, w, cx| this.set_section(Section::Images, w, cx)))
+            .on_action(cx.listener(|this, _: &ShowNetworks, w, cx| this.set_section(Section::Networks, w, cx)))
+            .on_action(cx.listener(|this, _: &ShowPods, w, cx| this.set_section(Section::Pods, w, cx)))
+            .on_action(cx.listener(|this, _: &ShowServices, w, cx| this.set_section(Section::Services, w, cx)))
             .on_action(cx.listener(|_, _: &native::CloseWindow, _, cx| {
                 if !quit::is_quitting(cx) {
                     cx.propagate();

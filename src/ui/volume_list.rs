@@ -20,6 +20,7 @@ use crate::state::volume_store::{
 use crate::ui::container_list::{
     CHILD_INSET, DOCKER_BLUE, Entrance, GUTTER, ICON_SIZE, ROW_HEIGHT, ROW_INSET, ROW_TRAILING_INSET, Tree, divider_line, tree_lines,
 };
+use crate::ui::key_nav::{self, CursorList, Stop};
 use crate::ui::native::MenuEntry;
 use crate::ui::{
     ENTER_DURATION, SNAPPY_SPRING, TOOLBAR_HEIGHT, delayed_reveal, drag_area, native, spinner, tabular_nums, text, toast,
@@ -27,10 +28,12 @@ use crate::ui::{
 
 actions!(
     volume_list,
-    [NewVolume, RemoveSelected, SelectNext, SelectPrev, FocusSearch, ClearSelection, ToggleUnusedOnly]
+    [NewVolume, RemoveSelected, FocusSearch, ClearSelection, ToggleUnusedOnly]
 );
 
 const CONTEXT: &str = "VolumeList";
+/// The list context, and the context of the keys that all lists share.
+const KEY_CONTEXT: &str = "VolumeList NavList";
 const SIZE_WIDTH: f32 = 90.;
 const ACTIONS_WIDTH: f32 = 40.;
 /// The most containers that the subtitle of a row names.
@@ -42,8 +45,6 @@ pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("cmd-n", NewVolume, Some(CONTEXT)),
         KeyBinding::new("cmd-backspace", RemoveSelected, Some(CONTEXT)),
-        KeyBinding::new("down", SelectNext, Some(CONTEXT)),
-        KeyBinding::new("up", SelectPrev, Some(CONTEXT)),
         KeyBinding::new("cmd-f", FocusSearch, Some(CONTEXT)),
         KeyBinding::new("escape", ClearSelection, Some(CONTEXT)),
         KeyBinding::new("cmd-shift-u", ToggleUnusedOnly, Some(CONTEXT)),
@@ -78,6 +79,8 @@ pub struct VolumeList {
     /// full list arrives, so the first list does not fade in row by row.
     known: Option<HashSet<String>>,
     selected: Option<String>,
+    /// The row with the hover. The pointer and the arrow keys move it.
+    cursor: key_nav::ListCursor,
     /// A volume to select when it comes into the list. A link from a
     /// container can ask for a volume before the first list arrives.
     pending_reveal: Option<String>,
@@ -121,7 +124,7 @@ impl VolumeList {
             store,
             containers,
             search,
-            focus: cx.focus_handle(),
+            focus: cx.focus_handle().tab_stop(true),
             scroll: UniformListScrollHandle::new(),
             // The anonymous volumes have random names, so their group starts
             // collapsed.
@@ -132,6 +135,7 @@ impl VolumeList {
             entrances: 0,
             known: None,
             selected: None,
+            cursor: key_nav::ListCursor::default(),
             pending_reveal: None,
             search_open: false,
             unused_only: false,
@@ -308,34 +312,6 @@ impl VolumeList {
         }
     }
 
-    fn move_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
-        let rows: Vec<(usize, &String)> = self
-            .items
-            .iter()
-            .enumerate()
-            .filter_map(|(ix, item)| match item {
-                VolumeItem::Row { name, .. } => Some((ix, name)),
-                VolumeItem::Group { .. } => None,
-            })
-            .collect();
-        if rows.is_empty() {
-            return;
-        }
-        let current = self
-            .selected
-            .as_ref()
-            .and_then(|sel| rows.iter().position(|(_, name)| *name == sel));
-        let next = match current {
-            None if delta > 0 => 0,
-            None => rows.len() - 1,
-            Some(i) => (i as isize + delta).clamp(0, rows.len() as isize - 1) as usize,
-        };
-        let (ix, name) = rows[next];
-        let name = name.clone();
-        self.scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
-        self.select(Some(name), false, cx);
-    }
-
     /// The names of the containers that use a volume.
     fn users(&self, name: &str, cx: &App) -> Vec<(String, String)> {
         self.containers
@@ -457,7 +433,7 @@ impl VolumeList {
         names
     }
 
-    fn show_group_menu(&mut self, key: String, window: &mut Window, cx: &mut Context<Self>) {
+    fn show_group_menu(&mut self, key: String, at: Option<Point<Pixels>>, window: &mut Window, cx: &mut Context<Self>) {
         let members = self.group_members(&key, cx);
         let unused = members.iter().filter(|n| !self.users.contains_key(*n)).count();
         let entries = vec![
@@ -465,7 +441,7 @@ impl VolumeList {
             MenuEntry::Separator,
             MenuEntry::item("Copy Names"),
         ];
-        native::show_context_menu(entries, window, cx, move |this, ix, window, cx| match ix {
+        native::show_context_menu_at(entries, at, window, cx, move |this, ix, window, cx| match ix {
             0 => this.request_group_remove(key.clone(), window, cx),
             2 => {
                 let noun = if members.len() == 1 { "name" } else { "names" };
@@ -513,7 +489,7 @@ impl VolumeList {
         .detach();
     }
 
-    fn show_row_menu(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
+    fn show_row_menu(&mut self, name: String, at: Option<Point<Pixels>>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(row) = self.store.read(cx).rows.get(&name).cloned() else {
             return;
         };
@@ -545,7 +521,7 @@ impl VolumeList {
             Some(Box::new(move |this, window, cx| this.request_remove(name.clone(), window, cx))),
         ));
         let (entries, handlers): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
-        native::show_context_menu(entries, window, cx, move |this, ix, window, cx| {
+        native::show_context_menu_at(entries, at, window, cx, move |this, ix, window, cx| {
             if let Some(Some(handler)) = handlers.get(ix) {
                 handler(this, window, cx);
             }
@@ -653,14 +629,21 @@ impl VolumeList {
             tile.bg(DOCKER_BLUE)
                 .child(svg().path(crate::assets::DOCKER_LOGO).size(px(20.)).text_color(gpui::white()))
         };
+        let cursor = self.cursor.is_group(key);
+        let hover_key = key.to_string();
         h_flex()
             .id(("group", ix))
             .group(HEADER_GROUP)
+            .relative()
             .size_full()
             .pr_2()
             .gap_3()
             .rounded(px(8.))
-            .hover(|s| s.bg(native::hover(cx)))
+            // The pointer and the arrow keys move the same hover.
+            .when(cursor, |d| d.bg(native::hover(cx)).child(key_nav::track_bounds(self.cursor.bounds.clone())))
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                key_nav::hover_row(this, key_nav::Cursor::Group(hover_key.clone()), *hovered, cx)
+            }))
             .child(
                 div().w(px(GUTTER - 12.)).flex().justify_end().child(
                     Icon::new(IconName::ChevronRight)
@@ -696,10 +679,13 @@ impl VolumeList {
             )
             .child(size_cell(size, cx))
             .child(div().w(px(ACTIONS_WIDTH)).flex_shrink_0())
-            .on_click(cx.listener(move |this, _, _, cx| this.toggle_group(&toggle, cx)))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.focus.focus(window, cx);
+                this.toggle_group(&toggle, cx)
+            }))
             .on_mouse_down(
                 MouseButton::Right,
-                cx.listener(move |this, _, window, cx| this.show_group_menu(menu_key.clone(), window, cx)),
+                cx.listener(move |this, _, window, cx| this.show_group_menu(menu_key.clone(), None, window, cx)),
             )
             .into_any_element()
     }
@@ -712,6 +698,7 @@ impl VolumeList {
         let t = cx.theme();
         let removing = store.removing.contains(name);
         let selected = self.selected.as_deref() == Some(name);
+        let hovered = self.cursor.is_row(name);
         let emphasized = window.is_window_active() && self.focus.contains_focused(window, cx);
         let on_accent = selected && emphasized && native::has_emphasized_selection(cx);
         let secondary = if on_accent { gpui::white().opacity(0.8) } else { t.muted_foreground };
@@ -742,13 +729,16 @@ impl VolumeList {
         } else {
             let remove_name = name.to_string();
             h_flex()
-                .when(!selected, |d| d.invisible().group_hover(ROW_GROUP, |s| s.visible()))
+                .when(!selected && !hovered, |d| d.invisible())
                 .child(
                     Button::new(("remove", ix))
                         .icon(IconName::Trash)
                         .when(selected, |b| b.outline())
                         .when(!selected, |b| b.ghost())
                         .xsmall()
+                        // Command-Delete and the context menu remove the
+                        // row, so Tab does not stop on each row.
+                        .tab_stop(false)
                         .disabled(in_use)
                         .tooltip(if in_use { "In use. Remove the containers first." } else { "Remove (⌘⌫)" })
                         .on_click(cx.listener(move |this, _, window, cx| {
@@ -767,9 +757,11 @@ impl VolumeList {
             t.muted_foreground
         };
         let row_name = name.to_string();
+        let hover_key = name.to_string();
         h_flex()
             .id(("row", ix))
             .group(ROW_GROUP)
+            .relative()
             .h_full()
             .flex_1()
             .map(|d| if grouped { d.ml(px(CHILD_INSET - ROW_INSET)).pl(px(12.)) } else { d.pl(px(GUTTER)) })
@@ -780,10 +772,20 @@ impl VolumeList {
             .map(|d| {
                 if selected {
                     d.bg(native::selection(emphasized, cx))
+                } else if hovered {
+                    d.bg(native::hover(cx))
                 } else {
-                    d.hover(|s| s.bg(native::hover(cx)))
+                    d
                 }
             })
+            // The context menu key opens the menu of the hovered row, or of
+            // the selected row when no row has the hover.
+            .when(hovered || (selected && self.cursor.at.is_none()), |d| {
+                d.child(key_nav::track_bounds(self.cursor.bounds.clone()))
+            })
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                key_nav::hover_row(this, key_nav::Cursor::Row(hover_key.clone()), *hovered, cx)
+            }))
             .when(on_accent, |d| d.text_color(gpui::white()))
             .when(removing, |d| d.opacity(0.7))
             .child(
@@ -832,7 +834,7 @@ impl VolumeList {
                 cx.listener(move |this, _, window, cx| {
                     this.focus.focus(window, cx);
                     this.select(Some(row_name.clone()), true, cx);
-                    this.show_row_menu(row_name.clone(), window, cx);
+                    this.show_row_menu(row_name.clone(), None, window, cx);
                 }),
             )
             .into_any_element()
@@ -862,6 +864,47 @@ fn size_cell(size: Option<u64>, cx: &App) -> Div {
         .font_features(tabular_nums())
         .text_color(cx.theme().muted_foreground)
         .when_some(size, |d, size| d.child(format_bytes(size)))
+}
+
+impl CursorList for VolumeList {
+    fn stops(&self) -> Vec<Stop> {
+        key_nav::grouped_stops(self.items.iter(), |item| match item {
+            VolumeItem::Group { key, collapsed, .. } => Some(Ok((key.as_str(), *collapsed))),
+            VolumeItem::Row { name, grouped } => Some(Err((name.as_str(), *grouped))),
+        })
+    }
+
+    fn list_cursor(&self) -> &key_nav::ListCursor {
+        &self.cursor
+    }
+
+    fn list_cursor_mut(&mut self) -> &mut key_nav::ListCursor {
+        &mut self.cursor
+    }
+
+    fn selected_key(&self) -> Option<&str> {
+        self.selected.as_deref()
+    }
+
+    fn select_key(&mut self, key: String, cx: &mut Context<Self>) {
+        self.select(Some(key), false, cx);
+    }
+
+    fn scroll(&self) -> &UniformListScrollHandle {
+        &self.scroll
+    }
+
+    fn toggle_group_at(&mut self, key: &str, cx: &mut Context<Self>) {
+        self.toggle_group(key, cx);
+    }
+
+    fn show_menu_at(&mut self, stop: &Stop, at: Option<Point<Pixels>>, window: &mut Window, cx: &mut Context<Self>) {
+        match stop {
+            Stop::Group { key, .. } => self.show_group_menu(key.clone(), at, window, cx),
+            Stop::Row { key, .. } => self.show_row_menu(key.clone(), at, window, cx),
+            Stop::Skip => {}
+        }
+    }
 }
 
 impl Render for VolumeList {
@@ -920,8 +963,8 @@ impl Render for VolumeList {
                 .into_any_element()
         };
 
-        v_flex()
-            .key_context(CONTEXT)
+        let root = key_nav::list_actions(v_flex(), cx);
+        root.key_context(KEY_CONTEXT)
             .track_focus(&self.focus)
             .size_full()
             .on_action(cx.listener(|this, _: &RemoveSelected, window, cx| {
@@ -929,9 +972,11 @@ impl Render for VolumeList {
                     this.request_remove(name, window, cx);
                 }
             }))
-            .on_action(cx.listener(|this, _: &SelectNext, _, cx| this.move_selection(1, cx)))
-            .on_action(cx.listener(|this, _: &SelectPrev, _, cx| this.move_selection(-1, cx)))
-            .on_action(cx.listener(|this, _: &ClearSelection, _, cx| this.select(None, false, cx)))
+            .on_action(cx.listener(|this, _: &ClearSelection, _, cx| {
+                this.cursor.at = None;
+                this.select(None, false, cx);
+                cx.notify();
+            }))
             .on_action(cx.listener(|this, _: &NewVolume, window, cx| this.request_create(String::new(), None, window, cx)))
             .on_action(cx.listener(|this, _: &ToggleUnusedOnly, _, cx| this.toggle_unused_only(cx)))
             .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {

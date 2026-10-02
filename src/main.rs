@@ -29,6 +29,7 @@ fn main() {
             gpui_component::init(cx);
             ui::image_icon::LogoStore::init(cx);
             ui::sync_reduce_motion(cx);
+            ui::key_nav::bind_keys(cx);
             ui::app_view::bind_keys(cx);
             ui::container_list::bind_keys(cx);
             ui::volume_list::bind_keys(cx);

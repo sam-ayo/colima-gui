@@ -3,6 +3,7 @@ pub mod container_detail;
 pub mod container_list;
 pub mod image_icon;
 pub mod json_view;
+pub mod key_nav;
 pub mod logs_view;
 pub mod native;
 pub mod quit;

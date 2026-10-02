@@ -101,6 +101,12 @@ impl LogsView {
         cx.notify();
     }
 
+    /// Scrolls the log for a key. End follows the end of the log again.
+    pub fn key_scroll(&mut self, m: crate::ui::key_nav::Move, cx: &mut Context<Self>) {
+        crate::ui::key_nav::scroll_lines(&self.list, m, true);
+        cx.notify();
+    }
+
     fn render_line(buffer: &LogBuffer, ix: usize, cx: &App) -> AnyElement {
         let Some(line) = buffer.visible_line(ix) else {
             return div().into_any_element();

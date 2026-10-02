@@ -367,7 +367,10 @@ pub fn init_menus(cx: &mut App) {
 }
 
 fn set_menus(cx: &mut App) {
-    use crate::ui::app_view::ToggleSidebar;
+    use crate::ui::app_view::{
+        ShowContainers, ShowImages, ShowNetworks, ShowPods, ShowServices, ShowVolumes, ToggleSidebar,
+    };
+    use crate::ui::key_nav::{NextTab, PrevTab};
     use crate::ui::container_list::{
         FocusSearch, RemoveSelected, RestartSelected, StartSelected, StopSelected, ToggleRunningOnly,
     };
@@ -406,6 +409,17 @@ fn set_menus(cx: &mut App) {
         ]),
         Menu::new("View").items([
             MenuItem::action("Toggle Sidebar", ToggleSidebar),
+            MenuItem::separator(),
+            MenuItem::action("Containers", ShowContainers),
+            MenuItem::action("Volumes", ShowVolumes),
+            MenuItem::action("Images", ShowImages),
+            MenuItem::action("Networks", ShowNetworks),
+            MenuItem::action("Pods", ShowPods),
+            MenuItem::action("Services", ShowServices),
+            MenuItem::separator(),
+            MenuItem::action("Show Next Tab", NextTab),
+            MenuItem::action("Show Previous Tab", PrevTab),
+            MenuItem::separator(),
             MenuItem::action("Show Running Containers Only", ToggleRunningOnly),
             MenuItem::separator(),
             MenuItem::submenu(Menu::new("Accent Color").items(accent_items)),
@@ -458,7 +472,7 @@ pub fn show_alert(message: &str, info: &str, buttons: &[&str]) -> Option<usize> 
 /// is `ok`, and Return chooses it. `on_done` gets the text, but not if the
 /// user cancels.
 ///
-/// As with `show_context_menu`, the alert opens from a task after the next
+/// As with `show_context_menu_at`, the alert opens from a task after the next
 /// frame, because it runs its own event loop.
 pub fn ask_text<T: 'static>(
     request: TextRequest,
@@ -505,25 +519,30 @@ impl MenuEntry {
     }
 }
 
-/// Shows an AppKit context menu at the pointer. When the user chooses an
-/// item, `on_choose` gets the index of that item in `entries`.
+/// Shows an AppKit context menu. When the user chooses an item,
+/// `on_choose` gets the index of that item in `entries`. `at` is the
+/// position of the top left corner of the menu in the window. A menu that a
+/// key opens uses it, so the menu opens next to the row. `None` uses the
+/// pointer position.
 ///
 /// The menu runs its own event loop until it closes. That loop must not run
 /// while GPUI updates the app, so the menu opens from a task. The task
 /// starts after the next frame, so the window first shows the changes of
 /// the current event, for example the selection of the clicked row.
-pub fn show_context_menu<T: 'static>(
+pub fn show_context_menu_at<T: 'static>(
     entries: Vec<MenuEntry>,
+    at: Option<Point<Pixels>>,
     window: &mut Window,
     cx: &mut Context<T>,
     on_choose: impl FnOnce(&mut T, usize, &mut Window, &mut Context<T>) + 'static,
 ) {
     let this = cx.weak_entity();
+    let at = at.map(|p| (f64::from(f32::from(p.x)), f64::from(f32::from(p.y))));
     cx.notify();
     window.on_next_frame(move |window, cx| {
         window
             .spawn(cx, async move |cx| {
-                if let Some(ix) = platform::pop_up_menu(&entries) {
+                if let Some(ix) = platform::pop_up_menu(&entries, at) {
                     let _ = this.update_in(cx, |this, window, cx| on_choose(this, ix, window, cx));
                 }
             })
@@ -819,7 +838,9 @@ mod platform {
         }
     }
 
-    pub(super) fn pop_up_menu(entries: &[MenuEntry]) -> Option<usize> {
+    /// `at` is a position in the content of the key window, from the top
+    /// left corner.
+    pub(super) fn pop_up_menu(entries: &[MenuEntry], at: Option<(f64, f64)>) -> Option<usize> {
         let mtm = MainThreadMarker::new()?;
         let target = MenuTarget::new(mtm);
         let menu = NSMenu::new(mtm);
@@ -845,8 +866,18 @@ mod platform {
             menu.addItem(&item);
         }
         // With no view, the location is in screen coordinates. The top left
-        // of the menu goes to the pointer.
-        menu.popUpMenuPositioningItem_atLocation_inView(None, NSEvent::mouseLocation(), None);
+        // of the menu goes to the pointer, or to `at`. The content of the
+        // window fills its frame, and the screen coordinates go up from the
+        // bottom.
+        let window = NSApplication::sharedApplication(mtm).keyWindow();
+        let location = match (at, window) {
+            (Some((x, y)), Some(window)) => {
+                let frame = window.frame();
+                objc2_foundation::NSPoint::new(frame.origin.x + x, frame.origin.y + frame.size.height - y)
+            }
+            _ => NSEvent::mouseLocation(),
+        };
+        menu.popUpMenuPositioningItem_atLocation_inView(None, location, None);
         usize::try_from(target.ivars().get()).ok()
     }
 
@@ -1016,7 +1047,7 @@ mod platform {
     pub(super) fn autosave_frame(_: &Window, _: &'static str, _: &App) {}
     pub(super) fn set_app_icon(_: &[u8]) {}
     pub(super) fn show_about_panel(_: &str, _: &str) {}
-    pub(super) fn pop_up_menu(_: &[MenuEntry]) -> Option<usize> {
+    pub(super) fn pop_up_menu(_: &[MenuEntry], _: Option<(f64, f64)>) -> Option<usize> {
         None
     }
 

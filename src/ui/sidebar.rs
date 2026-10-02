@@ -9,6 +9,7 @@ use gpui::*;
 use gpui_component::{ActiveTheme, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit_assets::IconName;
 
+use super::key_nav::{self, BoundsCell};
 use super::{SIDEBAR_INSET, SIDEBAR_RADIUS, TOOLBAR_HEIGHT, drag_area, native, spinner, text};
 use crate::colima::Machine;
 
@@ -30,6 +31,15 @@ impl Section {
         Section::Networks,
     ];
     const KUBERNETES: [Section; 2] = [Section::Pods, Section::Services];
+    /// All the sections, in the order of the sidebar.
+    pub const ALL: [Section; 6] = [
+        Section::Containers,
+        Section::Volumes,
+        Section::Images,
+        Section::Networks,
+        Section::Pods,
+        Section::Services,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -61,6 +71,7 @@ impl Section {
 
 type SelectHandler = Rc<dyn Fn(Section, &mut Window, &mut App)>;
 type MachineHandler = Rc<dyn Fn(&str, &mut Window, &mut App)>;
+type HoverHandler = Rc<dyn Fn(usize, &mut Window, &mut App)>;
 
 #[derive(IntoElement)]
 pub struct Sidebar {
@@ -70,6 +81,12 @@ pub struct Sidebar {
     busy: HashSet<String>,
     /// The profile that the app connects to.
     current: String,
+    /// The row at the keyboard cursor: the sections in the order of
+    /// `Section::ALL`, then the machines. It is `None` when the sidebar does
+    /// not have the focus.
+    cursor: Option<usize>,
+    cursor_bounds: BoundsCell,
+    on_hover: HoverHandler,
     on_select: SelectHandler,
     on_open: MachineHandler,
     on_menu: MachineHandler,
@@ -87,6 +104,9 @@ impl Sidebar {
             machines: Vec::new(),
             busy: HashSet::new(),
             current: String::new(),
+            cursor: None,
+            cursor_bounds: BoundsCell::default(),
+            on_hover: Rc::new(|_, _, _| {}),
             on_select: Rc::new(on_select),
             on_open: Rc::new(|_, _, _| {}),
             on_menu: Rc::new(|_, _, _| {}),
@@ -109,6 +129,22 @@ impl Sidebar {
         self
     }
 
+    /// Shows the keyboard cursor on a row, and records the bounds of that
+    /// row in `bounds`.
+    /// `on_hover` gets the position of a row that the pointer enters, so
+    /// the arrow keys start from that row.
+    pub fn cursor(
+        mut self,
+        cursor: Option<usize>,
+        bounds: BoundsCell,
+        on_hover: impl Fn(usize, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.cursor = cursor;
+        self.cursor_bounds = bounds;
+        self.on_hover = Rc::new(on_hover);
+        self
+    }
+
     fn heading(label: &'static str, cx: &App) -> Div {
         let t = cx.theme();
         div()
@@ -121,12 +157,16 @@ impl Sidebar {
             .child(label)
     }
 
-    /// The row style that the sections and the machines share.
-    fn item(id: impl Into<ElementId>, active: bool, cx: &App) -> Stateful<Div> {
+    /// The row style that the sections and the machines share. The row at
+    /// position `ix` gets the hover fill when the keyboard cursor is on it.
+    fn item(&self, id: impl Into<ElementId>, ix: usize, active: bool, cx: &App) -> Stateful<Div> {
         let t = cx.theme();
         let accent = t.sidebar_accent;
+        let cursor = self.cursor == Some(ix);
+        let on_hover = self.on_hover.clone();
         h_flex()
             .id(id)
+            .relative()
             .h(px(28.))
             .gap_2p5()
             .px_2()
@@ -138,16 +178,28 @@ impl Sidebar {
             .map(|d| {
                 if active {
                     d.bg(accent).text_color(t.sidebar_accent_foreground)
-                } else {
+                } else if cursor {
+                    d.bg(accent.opacity(0.5))
+                } else if self.cursor.is_none() {
                     d.hover(|s| s.bg(accent.opacity(0.5)))
+                } else {
+                    // With the focus, only the cursor row has the hover fill.
+                    d
                 }
             })
+            .on_hover(move |hovered, window, cx| {
+                if *hovered {
+                    on_hover(ix, window, cx)
+                }
+            })
+            .when(cursor, |d| d.child(key_nav::track_bounds(self.cursor_bounds.clone())))
     }
 
     fn render_section(&self, section: Section, cx: &App) -> impl IntoElement {
         let active = section == self.active;
         let on_select = self.on_select.clone();
-        Self::item(section.label(), active, cx)
+        let ix = Section::ALL.iter().position(|&s| s == section).unwrap_or_default();
+        self.item(section.label(), ix, active, cx)
             .child(Icon::new(section.icon()).small().text_color(native::accent(cx)))
             .child(div().flex_1().child(section.label()))
             // Select on the press, so the answer is immediate.
@@ -168,7 +220,7 @@ impl Sidebar {
         let on_menu = self.on_menu.clone();
         let open_name = machine.name.clone();
         let menu_name = machine.name.clone();
-        Self::item(("machine", ix), current, cx)
+        self.item(("machine", ix), Section::ALL.len() + ix, current, cx)
             // A click on the row shows the containers of this machine. A
             // right click shows the machine actions.
             .on_click(move |_, window, cx| on_open(&open_name, window, cx))

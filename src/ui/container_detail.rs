@@ -16,6 +16,7 @@ use crate::runtime::Backend;
 use crate::state::container_store::{ContainerStore, StoreEvent};
 use crate::state::stats_store::StatsStore;
 use crate::ui::json_view::{self, Json};
+use crate::ui::key_nav::{self, DetailKeys, KeyNav, Move};
 use crate::ui::logs_view::LogsView;
 use crate::ui::stats_view::StatsView;
 use crate::ui::{
@@ -87,10 +88,48 @@ pub struct ContainerDetail {
     inspect_list: ListState,
     /// The last row that this pane saw. Used to find changes.
     row: Option<ContainerRow>,
+    nav: KeyNav,
     _subs: Vec<Subscription>,
 }
 
 impl EventEmitter<DetailEvent> for ContainerDetail {}
+
+impl Focusable for ContainerDetail {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.nav.focus.clone()
+    }
+}
+
+impl DetailKeys for ContainerDetail {
+    fn nav(&self) -> &KeyNav {
+        &self.nav
+    }
+
+    fn tab_position(&self) -> (usize, usize) {
+        let ix = DetailTab::ALL.iter().position(|&t| t == self.tab).unwrap_or(0);
+        (ix, DetailTab::ALL.len())
+    }
+
+    fn show_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_tab_at(ix, window, cx);
+    }
+
+    fn key_move(&mut self, m: Move, cx: &mut Context<Self>) {
+        match self.tab {
+            DetailTab::Info => match m {
+                Move::By(d) if d.abs() >= key_nav::PAGE_ROWS => self.nav.scroll_page(d.signum() as f32),
+                _ => self.nav.move_cursor(m),
+            },
+            DetailTab::Logs => {
+                if let Some(logs) = &self.logs {
+                    logs.update(cx, |l, cx| l.key_scroll(m, cx));
+                }
+            }
+            DetailTab::Stats => {}
+            DetailTab::Inspect => key_nav::scroll_lines(&self.inspect_list, m, false),
+        }
+    }
+}
 
 impl ContainerDetail {
     pub fn new(
@@ -129,6 +168,7 @@ impl ContainerDetail {
             logs: None,
             inspect: Inspect::Loading,
             inspect_list: ListState::new(0, ListAlignment::Top, px(200.)),
+            nav: KeyNav::new(cx),
             _subs: subs,
         };
         this.load_inspect(cx);
@@ -205,9 +245,32 @@ impl ContainerDetail {
         list.remeasure();
     }
 
+    /// Shows the tab at a position, from 0. A position with no tab does
+    /// nothing.
+    pub fn set_tab_at(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(&tab) = DetailTab::ALL.get(ix) {
+            self.set_tab(tab, window, cx);
+        }
+    }
+
+    /// Shows the next tab, or the previous tab for a negative `delta`.
+    pub fn cycle_tab(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
+        let count = DetailTab::ALL.len() as isize;
+        let ix = DetailTab::ALL.iter().position(|&t| t == self.tab).unwrap_or(0) as isize;
+        self.set_tab(DetailTab::ALL[(ix + delta).rem_euclid(count) as usize], window, cx);
+    }
+
+    /// Takes the focus from the list. The cursor goes to the first row.
+    pub fn focus_in(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.nav.focus.focus(window, cx);
+        self.nav.start();
+        cx.notify();
+    }
+
     fn set_tab(&mut self, tab: DetailTab, window: &mut Window, cx: &mut Context<Self>) {
         if tab != self.tab {
             self.tab_changes += 1;
+            self.nav.reset();
         }
         self.tab = tab;
         if tab == DetailTab::Logs {
@@ -318,7 +381,18 @@ impl ContainerDetail {
 
         let ports = (!row.ports.is_empty()).then(|| {
             section("Ports", cx).child(card(
-                row.ports.iter().enumerate().map(|(ix, port)| port_row(ix, port, cx)),
+                row.ports.iter().enumerate().map(|(ix, port)| {
+                    // A port with a URL opens in the browser on Return.
+                    let row = port_row(ix, port, cx);
+                    match port.url() {
+                        Some(url) => div().child(self.nav.row(
+                            row.id(("port-row", ix)),
+                            Rc::new(move |_, cx| cx.open_url(&url)),
+                            cx,
+                        )),
+                        None => row,
+                    }
+                }),
                 cx,
             ))
         });
@@ -355,19 +429,20 @@ impl ContainerDetail {
                             .font_family(mono.clone())
                             .text_color(muted)
                             .child(m.destination.clone()),
-                    )
-                    // A volume opens in the volume list.
-                    .when_some(volume, |d, name| {
-                        d.cursor_pointer()
-                            .hover(|d| d.bg(native::hover(cx)))
+                    );
+                // A volume opens in the volume list.
+                let row = match volume {
+                    Some(name) => self.nav.row(
+                        row.cursor_pointer()
                             .child(Icon::new(IconName::ChevronRight).xsmall().text_color(muted))
                             .tooltip(|window, cx| {
                                 gpui_component::tooltip::Tooltip::new("Show in Volumes").build(window, cx)
-                            })
-                            .on_click(cx.listener(move |_, _, _, cx| {
-                                cx.emit(DetailEvent::RevealVolume(name.clone()))
-                            }))
-                    });
+                            }),
+                        key_nav::handler(cx, move |_, _, cx| cx.emit(DetailEvent::RevealVolume(name.clone()))),
+                        cx,
+                    ),
+                    None => row,
+                };
                 // `card` takes plain rows.
                 div().child(row)
             }), cx))
@@ -383,31 +458,43 @@ impl ContainerDetail {
             .gap_3()
             .pt_1()
             .child(
-                Button::new("open-terminal")
-                    .outline()
-                    .small()
-                    .h(px(NATIVE_BUTTON_HEIGHT))
-                    .flex_1()
-                    .icon(Icon::new(IconName::SquareTerminal))
-                    .label("Open Terminal")
-                    .disabled(!running)
-                    .tooltip("Open a shell in this container in the Terminal app")
-                    .on_click(cx.listener(|this, _, _, cx| this.open_terminal(cx))),
+                self.nav
+                    .button(
+                        Button::new("open-terminal")
+                            .outline()
+                            .small()
+                            .h(px(NATIVE_BUTTON_HEIGHT))
+                            .w_full()
+                            .icon(Icon::new(IconName::SquareTerminal))
+                            .label("Open Terminal")
+                            .disabled(!running)
+                            .tooltip("Open a shell in this container in the Terminal app"),
+                        running,
+                        key_nav::handler(cx, |this, _, cx| this.open_terminal(cx)),
+                        cx,
+                    )
+                    .flex_1(),
             )
             .child(
-                Button::new("restart")
-                    .outline()
-                    .small()
-                    .h(px(NATIVE_BUTTON_HEIGHT))
-                    .flex_1()
-                    .icon(Icon::new(restart.0))
-                    .when(pending, |b| b.icon(spinner()))
-                    .label(restart.1)
-                    .loading(pending)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        let id = this.id.clone();
-                        this.store.update(cx, |s, cx| s.run_action(&id, restart.2, cx));
-                    })),
+                self.nav
+                    .button(
+                        Button::new("restart")
+                            .outline()
+                            .small()
+                            .h(px(NATIVE_BUTTON_HEIGHT))
+                            .w_full()
+                            .icon(Icon::new(restart.0))
+                            .when(pending, |b| b.icon(spinner()))
+                            .label(restart.1)
+                            .loading(pending),
+                        !pending,
+                        key_nav::handler(cx, move |this, _, cx| {
+                            let id = this.id.clone();
+                            this.store.update(cx, |s, cx| s.run_action(&id, restart.2, cx));
+                        }),
+                        cx,
+                    )
+                    .flex_1(),
             );
 
         // The content is in an inner column, so a long list scrolls and
@@ -416,6 +503,7 @@ impl ContainerDetail {
             .id("info")
             .size_full()
             .overflow_y_scroll()
+            .track_scroll(&self.nav.scroll)
             .child(
                 v_flex()
                     .px_5()
@@ -637,7 +725,8 @@ fn port_row(ix: usize, port: &Port, cx: &App) -> Div {
 }
 
 impl Render for ContainerDetail {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.nav.begin(window);
         let t = cx.theme().clone();
         let store = self.store.read(cx);
         let row = store.set.rows.get(&self.id).cloned();
@@ -735,7 +824,8 @@ impl Render for ContainerDetail {
                 })
         });
 
-        v_flex()
+        key_nav::detail_actions(v_flex(), cx)
+            .track_focus(&self.nav.focus)
             .size_full()
             .border_l_1()
             .border_color(t.border)

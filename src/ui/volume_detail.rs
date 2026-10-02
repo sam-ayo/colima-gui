@@ -18,6 +18,7 @@ use crate::runtime::Backend;
 use crate::state::container_store::ContainerStore;
 use crate::state::volume_store::VolumeStore;
 use crate::ui::json_view::{self, Json};
+use crate::ui::key_nav::{self, DetailKeys, KeyNav, Move};
 use crate::ui::container_detail::{card, field, list_row, loading, section, segmented_control};
 use crate::ui::{ENTER_DURATION, NATIVE_BUTTON_HEIGHT, TOOLBAR_HEIGHT, drag_area, native, tabular_nums, text, toast};
 use crate::ui::toast::Toast;
@@ -76,9 +77,71 @@ pub struct VolumeDetail {
     /// different folder, so the pane ignores it.
     files_gen: u64,
     files_scroll: UniformListScrollHandle,
+    /// The row of the Files tab at the keyboard cursor.
+    file_cursor: Option<usize>,
+    nav: KeyNav,
 }
 
 impl EventEmitter<VolumeDetailEvent> for VolumeDetail {}
+
+impl Focusable for VolumeDetail {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.nav.focus.clone()
+    }
+}
+
+impl DetailKeys for VolumeDetail {
+    fn nav(&self) -> &KeyNav {
+        &self.nav
+    }
+
+    fn tab_position(&self) -> (usize, usize) {
+        let ix = VolumeTab::ALL.iter().position(|&t| t == self.tab).unwrap_or(0);
+        (ix, VolumeTab::ALL.len())
+    }
+
+    fn show_tab(&mut self, ix: usize, _: &mut Window, cx: &mut Context<Self>) {
+        self.set_tab_at(ix, cx);
+    }
+
+    fn key_move(&mut self, m: Move, _: &mut Context<Self>) {
+        match self.tab {
+            VolumeTab::Info => match m {
+                Move::By(d) if d.abs() >= key_nav::PAGE_ROWS => self.nav.scroll_page(d.signum() as f32),
+                _ => self.nav.move_cursor(m),
+            },
+            VolumeTab::Files => {
+                let count = self.entries().map_or(0, |e| e.len());
+                self.file_cursor = m.apply(self.file_cursor, count);
+                if let Some(ix) = self.file_cursor {
+                    self.files_scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
+                }
+            }
+            VolumeTab::Inspect => key_nav::scroll_lines(&self.inspect_list, m, false),
+        }
+    }
+
+    fn key_parent(&mut self, cx: &mut Context<Self>) {
+        if self.tab == VolumeTab::Files {
+            self.open_folder(None, cx);
+        } else {
+            self.key_move(Move::First, cx);
+        }
+    }
+
+    fn key_activate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tab != VolumeTab::Files {
+            self.nav.activate(window, cx);
+            return;
+        }
+        let entry = self.file_cursor.and_then(|ix| self.entries()?.get(ix).cloned());
+        match entry {
+            Some(entry) if entry.kind == EntryKind::Folder => self.open_folder(Some(entry.name), cx),
+            Some(entry) if entry.kind == EntryKind::File => self.open_file(&entry, cx),
+            _ => {}
+        }
+    }
+}
 
 impl VolumeDetail {
     pub fn new(
@@ -101,6 +164,8 @@ impl VolumeDetail {
             files: None,
             files_gen: 0,
             files_scroll: UniformListScrollHandle::new(),
+            file_cursor: None,
+            nav: KeyNav::new(cx),
         };
         this.load_info(cx);
         this.set_tab(tab, cx);
@@ -113,9 +178,46 @@ impl VolumeDetail {
         self.tab
     }
 
+    /// Shows the tab at a position, from 0. A position with no tab does
+    /// nothing.
+    pub fn set_tab_at(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if let Some(&tab) = VolumeTab::ALL.get(ix) {
+            self.set_tab(tab, cx);
+        }
+    }
+
+    /// Shows the next tab, or the previous tab for a negative `delta`.
+    pub fn cycle_tab(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let count = VolumeTab::ALL.len() as isize;
+        let ix = VolumeTab::ALL.iter().position(|&t| t == self.tab).unwrap_or(0) as isize;
+        self.set_tab(VolumeTab::ALL[(ix + delta).rem_euclid(count) as usize], cx);
+    }
+
+    /// Takes the focus from the list. The cursor goes to the first row.
+    pub fn focus_in(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.nav.focus.focus(window, cx);
+        if self.tab == VolumeTab::Files {
+            if self.file_cursor.is_none() && self.entries().is_some_and(|e| !e.is_empty()) {
+                self.file_cursor = Some(0);
+            }
+        } else {
+            self.nav.start();
+        }
+        cx.notify();
+    }
+
+    /// The entries of the folder that the Files tab shows.
+    fn entries(&self) -> Option<&Rc<Vec<Entry>>> {
+        match &self.files {
+            Some(Load::Loaded(entries)) => Some(entries),
+            _ => None,
+        }
+    }
+
     fn set_tab(&mut self, tab: VolumeTab, cx: &mut Context<Self>) {
         if tab != self.tab {
             self.tab_changes += 1;
+            self.nav.reset();
         }
         self.tab = tab;
         if tab == VolumeTab::Files && self.files.is_none() {
@@ -184,6 +286,9 @@ impl VolumeDetail {
                 if this.files_gen != generation {
                     return;
                 }
+                // A reload can give a shorter list.
+                let count = result.as_ref().ok().and_then(|r| r.as_ref().ok()).map_or(0, |e| e.len());
+                this.file_cursor = this.file_cursor.filter(|_| count > 0).map(|ix| ix.min(count.saturating_sub(1)));
                 this.files = Some(match result {
                     Ok(Ok(entries)) => Load::Loaded(Rc::new(entries)),
                     Ok(Err(e)) => Load::Failed(e.to_string()),
@@ -209,6 +314,8 @@ impl VolumeDetail {
             }
         }
         self.files = Some(Load::Loading);
+        // The cursor goes to the first row of the new folder.
+        self.file_cursor = self.file_cursor.map(|_| 0);
         self.files_scroll.scroll_to_item(0, ScrollStrategy::Top);
         self.load_files(cx);
         cx.notify();
@@ -312,16 +419,16 @@ impl VolumeDetail {
                     h_flex()
                         .gap_1()
                         .child(div().flex_1().min_w_0().truncate().font_family(mono.clone()).child(mountpoint.clone()))
-                        .child(
+                        .child(self.nav.button(
                             Button::new("copy-mountpoint")
                                 .icon(Icon::new(IconName::Copy))
                                 .ghost()
                                 .xsmall()
-                                .tooltip("Copy the path in the Colima machine")
-                                .on_click(move |_, _, cx| {
-                                    toast::copy(mountpoint.clone(), mountpoint.clone(), cx)
-                                }),
-                        ),
+                                .tooltip("Copy the path in the Colima machine"),
+                            true,
+                            Rc::new(move |_, cx| toast::copy(mountpoint.clone(), mountpoint.clone(), cx)),
+                            cx,
+                        )),
                     cx,
                 ),
             ],
@@ -348,18 +455,22 @@ impl VolumeDetail {
             card(
                 users.into_iter().enumerate().map(|(ix, (id, name, state, status))| {
                     let dot = super::state_color(state, cx);
-                    list_row()
+                    let row = list_row()
                         .id(("user", ix))
                         .gap_2p5()
                         .cursor_pointer()
-                        .hover(|d| d.bg(native::hover(cx)))
                         .child(div().size(px(8.)).flex_shrink_0().rounded_full().bg(dot))
                         .child(div().flex_1().min_w_0().truncate().child(name))
                         .child(div().flex_shrink_0().max_w(relative(0.5)).truncate().text_color(muted).child(status))
-                        .child(Icon::new(IconName::ChevronRight).xsmall().text_color(muted))
-                        .on_click(cx.listener(move |_, _, _, cx| {
-                            cx.emit(VolumeDetailEvent::RevealContainer(id.clone()))
-                        }))
+                        .child(Icon::new(IconName::ChevronRight).xsmall().text_color(muted));
+                    self.nav
+                        .row(
+                            row,
+                            key_nav::handler(cx, move |_, _, cx| {
+                                cx.emit(VolumeDetailEvent::RevealContainer(id.clone()))
+                            }),
+                            cx,
+                        )
                         // `card` takes plain rows.
                         .into_any_element()
                 })
@@ -387,16 +498,21 @@ impl VolumeDetail {
         let labels = info.as_ref().and_then(|i| pairs("Labels", &i.labels, cx));
         let options = info.as_ref().and_then(|i| pairs("Options", &i.options, cx));
 
-        let remove = Button::new("remove-volume")
-            .outline()
-            .small()
-            .h(px(NATIVE_BUTTON_HEIGHT))
-            .w_full()
-            .icon(Icon::new(IconName::Trash))
-            .label("Remove…")
-            .disabled(in_use || store.removing.contains(&self.name))
-            .tooltip(if in_use { "Remove the containers that use the volume first" } else { "Delete the volume and its data" })
-            .on_click(cx.listener(|this, _, _, cx| cx.emit(VolumeDetailEvent::Remove(this.name.clone()))));
+        let blocked = in_use || store.removing.contains(&self.name);
+        let remove = self.nav.button(
+            Button::new("remove-volume")
+                .outline()
+                .small()
+                .h(px(NATIVE_BUTTON_HEIGHT))
+                .w_full()
+                .icon(Icon::new(IconName::Trash))
+                .label("Remove…")
+                .disabled(blocked)
+                .tooltip(if in_use { "Remove the containers that use the volume first" } else { "Delete the volume and its data" }),
+            !blocked,
+            key_nav::handler(cx, |this, _, cx| cx.emit(VolumeDetailEvent::Remove(this.name.clone()))),
+            cx,
+        );
 
         // The content is in an inner column, so a long list scrolls and
         // the cards do not shrink to the height of the pane.
@@ -404,6 +520,7 @@ impl VolumeDetail {
             .id("volume-info")
             .size_full()
             .overflow_y_scroll()
+            .track_scroll(&self.nav.scroll)
             .child(
                 v_flex()
                     .px_5()
@@ -526,6 +643,7 @@ impl VolumeDetail {
         let file = entry.kind == EntryKind::File;
         let name = entry.name.clone();
         let clicked = entry.clone();
+        let cursor = self.nav.is_shown() && self.file_cursor == Some(ix);
         let row = h_flex()
             .id(("entry", ix))
             .w_full()
@@ -565,7 +683,8 @@ impl VolumeDetail {
                 d.cursor_pointer()
                     .hover(|s| s.bg(native::hover(cx)))
                     .on_click(cx.listener(move |this, _, _, cx| this.open_file(&clicked, cx)))
-            });
+            })
+            .when(cursor, |d| d.bg(native::hover(cx)));
         // A row of a uniform list gets the width of its content, so the
         // wrapper sets the width of the pane.
         div().w_full().px_3().child(row).into_any_element()
@@ -601,7 +720,8 @@ fn ago_from(delta: i64) -> String {
 }
 
 impl Render for VolumeDetail {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.nav.begin(window);
         let t = cx.theme().clone();
         let store = self.store.read(cx);
         let row = store.rows.get(&self.name).cloned();
@@ -685,7 +805,8 @@ impl Render for VolumeDetail {
             cx,
         );
 
-        v_flex()
+        key_nav::detail_actions(v_flex(), cx)
+            .track_focus(&self.nav.focus)
             .size_full()
             .border_l_1()
             .border_color(t.border)
