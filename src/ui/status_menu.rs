@@ -26,6 +26,8 @@ enum Command {
     OpenUrl(String),
     StartColima,
     Quit,
+    /// Stops Colima, then quits.
+    QuitCompletely,
 }
 
 pub enum StatusMenuEvent {
@@ -118,6 +120,7 @@ impl StatusMenu {
             Command::OpenUrl(url) => cx.open_url(&url),
             Command::StartColima => self.store.update(cx, |s, cx| s.start_colima(cx)),
             Command::Quit => cx.quit(),
+            Command::QuitCompletely => cx.dispatch_action(&native::QuitCompletely),
         }
     }
 
@@ -237,6 +240,7 @@ fn menu_lines(store: &ContainerStore) -> (Vec<StatusLine>, Vec<Command>) {
     }
 
     b.separator().item(format!("Quit {}", native::APP_NAME), Some(Command::Quit));
+    b.item("Quit Completely", Some(Command::QuitCompletely));
     (b.lines, b.commands)
 }
 

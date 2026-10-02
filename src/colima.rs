@@ -158,6 +158,31 @@ pub fn run_action(profile: &str, action: MachineAction) -> Result<()> {
     run(&args)
 }
 
+/// Stops all the running profiles at the same time, and waits until all
+/// the commands finish. If `colima list` fails, Colima does not run, and
+/// there is nothing to stop.
+pub fn stop_running(force: bool) -> Result<()> {
+    let Ok(out) = colima().args(["list", "--json"]).output() else {
+        return Ok(());
+    };
+    let running: Vec<Machine> = parse_list(&String::from_utf8_lossy(&out.stdout))
+        .into_iter()
+        .filter(Machine::is_running)
+        .collect();
+    let action = if force { MachineAction::ForceStop } else { MachineAction::Stop };
+    std::thread::scope(|s| {
+        let handles: Vec<_> = running
+            .iter()
+            .map(|m| s.spawn(move || run_action(&m.name, action)))
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().unwrap_or_else(|_| Err(anyhow::anyhow!("colima stop failed"))))
+            .collect::<Result<Vec<()>>>()
+            .map(drop)
+    })
+}
+
 /// Opens a Terminal window with `colima ssh` for a profile. A `.command`
 /// file opens in Terminal without the automation permission that an
 /// AppleScript needs.

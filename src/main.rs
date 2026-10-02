@@ -34,6 +34,7 @@ fn main() {
             ui::volume_list::bind_keys(cx);
             ui::native::set_app_icon();
             ui::native::init_menus(cx);
+            ui::quit::init(cx);
             updater::init(cx);
             cx.on_window_closed(|cx, _| cx.quit()).detach();
 

@@ -19,6 +19,7 @@ actions!(
         HideOthers,
         ShowAll,
         Quit,
+        QuitCompletely,
         CloseWindow,
         Minimize,
         Zoom,
@@ -320,6 +321,7 @@ pub fn set_app_icon() {
 pub fn init_menus(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("cmd-q", Quit, None),
+        KeyBinding::new("alt-cmd-q", QuitCompletely, None),
         KeyBinding::new("cmd-h", Hide, None),
         KeyBinding::new("alt-cmd-h", HideOthers, None),
         KeyBinding::new("cmd-w", CloseWindow, None),
@@ -388,6 +390,7 @@ fn set_menus(cx: &mut App) {
             MenuItem::action("Show All", ShowAll),
             MenuItem::separator(),
             MenuItem::action(format!("Quit {APP_NAME}"), Quit),
+            MenuItem::action("Quit Completely", QuitCompletely),
         ]),
         Menu::new("File").items([MenuItem::action("Close Window", CloseWindow)]),
         Menu::new("Edit").items([

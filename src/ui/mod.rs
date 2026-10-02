@@ -4,6 +4,7 @@ pub mod container_list;
 pub mod image_icon;
 pub mod logs_view;
 pub mod native;
+pub mod quit;
 pub mod sidebar;
 pub mod stats_view;
 pub mod status_menu;

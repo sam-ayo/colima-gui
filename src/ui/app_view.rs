@@ -25,7 +25,7 @@ use crate::ui::status_menu::{StatusMenu, StatusMenuEvent};
 use crate::ui::volume_detail::{VolumeDetail, VolumeDetailEvent};
 use crate::ui::volume_list::{VolumeList, VolumeListEvent};
 use crate::ui::{
-    NATIVE_BUTTON_HEIGHT, native, native::MenuEntry, text,
+    NATIVE_BUTTON_HEIGHT, native, native::MenuEntry, quit, text,
     ENTER_DURATION, SIDEBAR_INSET, SIDEBAR_WIDTH, TOOLBAR_HEIGHT, delayed_reveal, drag_area, spinner,
 };
 
@@ -198,6 +198,7 @@ impl AppView {
                 cx.notify();
             }),
             cx.observe(&machines, |_, _, cx| cx.notify()),
+            cx.observe_global::<quit::Quitting>(|_, cx| cx.notify()),
             cx.subscribe_in(&machines, window, |this, _, ev: &MachineEvent, window, cx| match ev {
                 MachineEvent::Error(msg) => {
                     window.push_notification(Notification::error(msg.clone()), cx)
@@ -270,6 +271,9 @@ impl AppView {
                 ListEvent::Selected { id: None, pointer } => this.close_pane(Section::Containers, *pointer, cx),
             }),
         ];
+        // The app quits when the window closes. While Colima stops, a close
+        // would quit before the stop ends.
+        window.on_window_should_close(cx, |_, cx| !quit::is_quitting(cx));
         list.focus_handle(cx).focus(window, cx);
         AppView {
             store,
@@ -1128,6 +1132,11 @@ impl Render for AppView {
             .text_size(px(text::BODY))
             .text_color(t.foreground)
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
+            .on_action(cx.listener(|_, _: &native::CloseWindow, _, cx| {
+                if !quit::is_quitting(cx) {
+                    cx.propagate();
+                }
+            }))
             // A click on an area that cannot take the focus removes the
             // focus from a search or filter field. The focus goes to the
             // list, so the list shortcuts work. A focusable element below
@@ -1171,5 +1180,28 @@ impl Render for AppView {
                     )
                 },
             )
+            .when(quit::is_quitting(cx), |d| d.child(render_quitting(cx.theme())))
     }
+}
+
+/// Covers the window while Colima stops before the app quits.
+fn render_quitting(t: &Theme) -> impl IntoElement {
+    div()
+        .id("quitting-cover")
+        .absolute()
+        .inset_0()
+        .occlude()
+        .bg(t.background.opacity(0.9))
+        .flex()
+        .child(
+            empty_state(t)
+                .pb_0()
+                .child(spinner())
+                .child(empty_title("Stopping Colima…", t))
+                .child(
+                    div()
+                        .text_size(px(text::BODY))
+                        .child(format!("{} quits when Colima stops.", native::APP_NAME)),
+                ),
+        )
 }
