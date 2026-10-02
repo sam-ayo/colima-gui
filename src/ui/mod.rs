@@ -8,6 +8,7 @@ pub mod quit;
 pub mod sidebar;
 pub mod stats_view;
 pub mod status_menu;
+pub mod toast;
 pub mod volume_detail;
 pub mod volume_list;
 

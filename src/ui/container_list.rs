@@ -18,7 +18,7 @@ use crate::state::container_store::{ContainerStore, ListItem, StoreEvent, build_
 use crate::state::stats_store::{StatsStore, select_wanted};
 use crate::ui::native::MenuEntry;
 use crate::ui::{
-    ENTER_DURATION, SNAPPY_SPRING, TOOLBAR_HEIGHT, delayed_reveal, drag_area, native, spinner, tabular_nums, text,
+    ENTER_DURATION, SNAPPY_SPRING, TOOLBAR_HEIGHT, delayed_reveal, drag_area, native, spinner, tabular_nums, text, toast,
 };
 
 actions!(
@@ -739,12 +739,12 @@ impl ContainerList {
         let name = row.name.clone();
         entries.push((
             MenuEntry::item("Copy Name"),
-            Some(Box::new(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(name.clone())))),
+            Some(Box::new(move |_, _, cx| toast::copy(name.clone(), name.clone(), cx))),
         ));
         let full_id = row.id.clone();
         entries.push((
             MenuEntry::item("Copy ID"),
-            Some(Box::new(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(full_id.clone())))),
+            Some(Box::new(move |_, _, cx| toast::copy(full_id.clone(), full_id.clone(), cx))),
         ));
         entries.push((MenuEntry::Separator, None));
         entries.push((MenuEntry::item("Remove…"), action(Action::Remove, &id)));

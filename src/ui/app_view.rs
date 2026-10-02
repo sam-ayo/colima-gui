@@ -8,8 +8,7 @@ use std::time::{Duration, Instant};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants as _};
-use gpui_component::notification::Notification;
-use gpui_component::{ActiveTheme, Icon, Sizable as _, Theme, WindowExt as _, v_flex};
+use gpui_component::{ActiveTheme, Icon, Sizable as _, Theme, v_flex};
 use gpui_kit_assets::IconName;
 
 use crate::colima::{self, MachineAction};
@@ -21,11 +20,12 @@ use crate::state::volume_store::{VolumeEvent, VolumeStore};
 use crate::ui::container_detail::{ContainerDetail, DetailEvent};
 use crate::ui::container_list::{ContainerList, ListEvent};
 use crate::ui::sidebar::{Section, Sidebar};
+use crate::ui::toast::{Toast, Toaster};
 use crate::ui::status_menu::{StatusMenu, StatusMenuEvent};
 use crate::ui::volume_detail::{VolumeDetail, VolumeDetailEvent};
 use crate::ui::volume_list::{VolumeList, VolumeListEvent};
 use crate::ui::{
-    NATIVE_BUTTON_HEIGHT, native, native::MenuEntry, quit, text,
+    NATIVE_BUTTON_HEIGHT, native, native::MenuEntry, quit, text, toast,
     ENTER_DURATION, SIDEBAR_INSET, SIDEBAR_WIDTH, TOOLBAR_HEIGHT, delayed_reveal, drag_area, spinner,
 };
 
@@ -167,6 +167,7 @@ pub struct AppView {
     engine_status: EngineStatus,
     engine_changes: usize,
     _status_menu: Entity<StatusMenu>,
+    toaster: Entity<Toaster>,
     _subs: Vec<Subscription>,
     _detail_sub: Option<Subscription>,
     _volume_detail_sub: Option<Subscription>,
@@ -199,9 +200,9 @@ impl AppView {
             }),
             cx.observe(&machines, |_, _, cx| cx.notify()),
             cx.observe_global::<quit::Quitting>(|_, cx| cx.notify()),
-            cx.subscribe_in(&machines, window, |this, _, ev: &MachineEvent, window, cx| match ev {
+            cx.subscribe_in(&machines, window, |this, _, ev: &MachineEvent, _, cx| match ev {
                 MachineEvent::Error(msg) => {
-                    window.push_notification(Notification::error(msg.clone()), cx)
+                    toast::show(Toast::error(msg.clone()), cx)
                 }
                 MachineEvent::Ready(profile) => {
                     if this.store.read(cx).profile() == Some(profile.as_str()) {
@@ -209,9 +210,9 @@ impl AppView {
                     }
                 }
             }),
-            cx.subscribe_in(&store, window, |this, _, ev: &StoreEvent, window, cx| match ev {
+            cx.subscribe_in(&store, window, |this, _, ev: &StoreEvent, _, cx| match ev {
                 StoreEvent::Error(msg) => {
-                    window.push_notification(Notification::error(msg.clone()), cx)
+                    toast::show(Toast::error(msg.clone()), cx)
                 }
                 StoreEvent::VolumesChanged => {}
                 StoreEvent::Changed => {
@@ -240,7 +241,7 @@ impl AppView {
                     this.volume_list.focus_handle(cx).focus(window, cx);
                 }
                 VolumeEvent::Error(msg) => {
-                    window.push_notification(Notification::error(msg.clone()), cx)
+                    toast::show(Toast::error(msg.clone()), cx)
                 }
                 VolumeEvent::Pruned(count, bytes) => {
                     let noun = if *count == 1 { "volume" } else { "volumes" };
@@ -252,7 +253,7 @@ impl AppView {
                             crate::docker::stats::format_bytes(*bytes)
                         )
                     };
-                    window.push_notification(Notification::success(msg), cx)
+                    toast::show(Toast::success(msg), cx)
                 }
             }),
             cx.subscribe_in(&volume_list, window, |this, _, ev: &VolumeListEvent, window, cx| match ev {
@@ -304,6 +305,7 @@ impl AppView {
             engine_status: EngineStatus::Connecting,
             engine_changes: 0,
             _status_menu: status_menu,
+            toaster: cx.new(|cx| Toaster::new(window, cx)),
             _subs: subs,
             _detail_sub: None,
             _volume_detail_sub: None,
@@ -674,9 +676,9 @@ impl AppView {
         entries.push(item(
             "Open in Terminal",
             running,
-            Box::new(move |_, window, cx| {
+            Box::new(move |_, _, cx| {
                 if let Err(e) = colima::ssh_in_terminal(&ssh_name) {
-                    window.push_notification(Notification::error(e.to_string()), cx);
+                    toast::show(Toast::error(e.to_string()), cx);
                 }
             }),
         ));
@@ -691,7 +693,7 @@ impl AppView {
         entries.push(item(
             "Copy Docker Socket",
             true,
-            Box::new(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(socket.clone()))),
+            Box::new(move |_, _, cx| toast::copy(socket.clone(), socket.clone(), cx)),
         ));
         entries.push(separator());
         entries.push(item("Delete…", idle, action(MachineAction::Delete)));
@@ -779,7 +781,7 @@ impl AppView {
                     this.list.update(cx, |l, cx| l.clear_selection(cx));
                 }
                 DetailEvent::Error(msg) => {
-                    window.push_notification(Notification::error(msg.clone()), cx)
+                    toast::show(Toast::error(msg.clone()), cx)
                 }
                 DetailEvent::RevealVolume(name) => {
                     this.set_section(Section::Volumes, window, cx);
@@ -1181,6 +1183,7 @@ impl Render for AppView {
                 },
             )
             .when(quit::is_quitting(cx), |d| d.child(render_quitting(cx.theme())))
+            .child(self.toaster.clone())
     }
 }
 

@@ -22,7 +22,7 @@ use crate::ui::container_list::{
 };
 use crate::ui::native::MenuEntry;
 use crate::ui::{
-    ENTER_DURATION, SNAPPY_SPRING, TOOLBAR_HEIGHT, delayed_reveal, drag_area, native, spinner, tabular_nums, text,
+    ENTER_DURATION, SNAPPY_SPRING, TOOLBAR_HEIGHT, delayed_reveal, drag_area, native, spinner, tabular_nums, text, toast,
 };
 
 actions!(
@@ -467,7 +467,10 @@ impl VolumeList {
         ];
         native::show_context_menu(entries, window, cx, move |this, ix, window, cx| match ix {
             0 => this.request_group_remove(key.clone(), window, cx),
-            2 => cx.write_to_clipboard(ClipboardItem::new_string(members.join("\n"))),
+            2 => {
+                let noun = if members.len() == 1 { "name" } else { "names" };
+                toast::copy(members.join("\n"), format!("{} volume {noun}", members.len()), cx)
+            }
             _ => {}
         });
     }
@@ -529,12 +532,12 @@ impl VolumeList {
         let full_name = row.name.clone();
         entries.push((
             MenuEntry::item("Copy Name"),
-            Some(Box::new(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(full_name.clone())))),
+            Some(Box::new(move |_, _, cx| toast::copy(full_name.clone(), full_name.clone(), cx))),
         ));
         let mountpoint = row.mountpoint.clone();
         entries.push((
             MenuEntry::item("Copy Mount Point"),
-            Some(Box::new(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(mountpoint.clone())))),
+            Some(Box::new(move |_, _, cx| toast::copy(mountpoint.clone(), mountpoint.clone(), cx))),
         ));
         entries.push((MenuEntry::Separator, None));
         entries.push((

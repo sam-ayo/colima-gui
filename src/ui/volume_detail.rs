@@ -18,7 +18,7 @@ use crate::runtime::Backend;
 use crate::state::container_store::ContainerStore;
 use crate::state::volume_store::VolumeStore;
 use crate::ui::container_detail::{card, field, list_row, loading, section, segmented_control};
-use crate::ui::{ENTER_DURATION, NATIVE_BUTTON_HEIGHT, TOOLBAR_HEIGHT, code_line, drag_area, native, tabular_nums, text};
+use crate::ui::{ENTER_DURATION, NATIVE_BUTTON_HEIGHT, TOOLBAR_HEIGHT, code_line, drag_area, native, tabular_nums, text, toast};
 
 const INSPECT_LINE_HEIGHT: f32 = 18.;
 const FILE_ROW_HEIGHT: f32 = 30.;
@@ -272,7 +272,7 @@ impl VolumeDetail {
                                 .xsmall()
                                 .tooltip("Copy the path in the Colima machine")
                                 .on_click(move |_, _, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(mountpoint.clone()))
+                                    toast::copy(mountpoint.clone(), mountpoint.clone(), cx)
                                 }),
                         ),
                     cx,
