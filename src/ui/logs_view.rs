@@ -16,10 +16,10 @@ use gpui_component::{ActiveTheme, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit_assets::IconName;
 
 use crate::docker::ansi::Color;
-use crate::docker::logs::{self, Level, LogStream, Paint};
+use crate::docker::logs::{self, Level, LogLine, LogStream, Paint};
 use crate::runtime::{Backend, recv_batch};
 use crate::state::log_buffer::{LogBuffer, MAX_LINES};
-use crate::ui::{delayed_reveal, tabular_nums, text};
+use crate::ui::{delayed_reveal, native, tabular_nums, text};
 
 const LINE_HEIGHT: f32 = 18.;
 /// The space above the first line and below the last line.
@@ -162,12 +162,21 @@ impl LogsView {
         });
         let highlights: Vec<_> = combine_highlights(painted, matches).collect();
 
-        let tint = match line.level {
-            Some(Level::Error) => Some(t.red.opacity(0.09)),
-            Some(Level::Warn) => Some(t.yellow.opacity(0.10)),
-            _ if line.stream == LogStream::Stderr => Some(t.red.opacity(0.04)),
-            _ => None,
-        };
+        // Next lines with the same tint join into one block. Only the outer
+        // corners of the block are round. A day heading starts a new block.
+        let tint = line_tint(line, cx);
+        let next = buffer.visible_line(ix + 1);
+        let next_heading = next
+            .and_then(|l| l.time)
+            .is_some_and(|time| day.is_some_and(|d| d != time.date_naive()));
+        let joins_prev = tint.is_some()
+            && heading.is_none()
+            && ix
+                .checked_sub(1)
+                .and_then(|i| buffer.visible_line(i))
+                .is_some_and(|l| line_tint(l, cx) == tint);
+        let joins_next =
+            tint.is_some() && !next_heading && next.is_some_and(|l| line_tint(l, cx) == tint);
         let quiet = matches!(line.level, Some(Level::Trace | Level::Debug));
 
         // A line with no time gets an invisible time, so all text starts at
@@ -196,9 +205,10 @@ impl LogsView {
             .px_2()
             .py(px(1.))
             .gap_3()
-            .rounded(px(5.))
+            .when(!joins_prev, |d| d.rounded_tl(px(5.)).rounded_tr(px(5.)))
+            .when(!joins_next, |d| d.rounded_bl(px(5.)).rounded_br(px(5.)))
             .when_some(tint, |d, c| d.bg(c))
-            .hover(|s| s.bg(t.list_hover))
+            .hover(|s| s.bg(native::hover(cx)))
             .child(time)
             .child(
                 styled_line(ix, text, highlights, links)
@@ -229,6 +239,17 @@ impl LogsView {
             })
             .child(row)
             .into_any_element()
+    }
+}
+
+/// The background color of a line, from its level or its stream.
+fn line_tint(line: &LogLine, cx: &App) -> Option<Hsla> {
+    let t = cx.theme();
+    match line.level {
+        Some(Level::Error) => Some(t.red.opacity(0.09)),
+        Some(Level::Warn) => Some(t.yellow.opacity(0.10)),
+        _ if line.stream == LogStream::Stderr => Some(t.red.opacity(0.04)),
+        _ => None,
     }
 }
 
