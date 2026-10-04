@@ -1,23 +1,27 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 36 36">
-  <!-- The status item icon: the volcano and the containers of the app icon
-       in one color. macOS uses it as a template image, so only the alpha
-       counts. The ribs of the containers are holes. -->
+  <!-- The status item icon: the stack of containers of the app icon in one
+       color. macOS uses it as a template image, so only the alpha counts.
+       The mask cuts the edges of each container, from the back to the
+       front, so a front container hides the edges of the containers behind
+       it. -->
   <defs>
-    <mask id="ribs">
-      <rect width="36" height="36" fill="#fff"/>
-      <g stroke="#000" stroke-width="1.6" stroke-linecap="round">
-        <line x1="15" y1="15.5" x2="15" y2="18.5"/>
-        <line x1="18" y1="15.5" x2="18" y2="18.5"/>
-        <line x1="21" y1="15.5" x2="21" y2="18.5"/>
-        <line x1="19.5" y1="7.5" x2="19.5" y2="9.5"/>
-        <line x1="22.5" y1="7.5" x2="22.5" y2="9.5"/>
+    <mask id="edges" maskUnits="userSpaceOnUse" x="0" y="0" width="36" height="36">
+      <g stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round">
+      <polygon points="26.1,10.7 34.3,15.4 34.3,24.8 26.1,29.5 18,24.8 18,15.4" fill="#fff" stroke="#000"/>
+      <path d="M34.3,15.4 L26.1,20.1 L18,15.4 M26.1,20.1 L26.1,29.5" fill="none" stroke="#000"/>
+      <polygon points="9.9,10.7 18,15.4 18,24.8 9.9,29.5 1.7,24.8 1.7,15.4" fill="#fff" stroke="#000"/>
+      <path d="M18,15.4 L9.9,20.1 L1.7,15.4 M9.9,20.1 L9.9,29.5" fill="none" stroke="#000"/>
+      <polygon points="18,15.4 26.1,20.1 26.1,29.5 18,34.2 9.9,29.5 9.9,20.1" fill="#fff" stroke="#000"/>
+      <path d="M26.1,20.1 L18,24.8 L9.9,20.1 M18,24.8 L18,34.2" fill="none" stroke="#000"/>
+      <polygon points="18,1.3 26.1,6 26.1,15.4 18,20.1 9.9,15.4 9.9,6" fill="#fff" stroke="#000"/>
+      <path d="M26.1,6 L18,10.7 L9.9,6 M18,10.7 L18,20.1" fill="none" stroke="#000"/>
       </g>
     </mask>
   </defs>
-  <path d="M1 35 C7 31 11 26 13.5 22.5 Q18 24.5 22.5 22.5 C25 26 29 31 35 35 Z"/>
-  <g mask="url(#ribs)">
-    <rect x="11.5" y="13" width="13" height="8" rx="1.8"/>
-    <rect x="16" y="5" width="10" height="7" rx="1.5" opacity="0.8"/>
-    <rect x="11" y="0.5" width="7" height="3.5" rx="1.2" opacity="0.55"/>
+  <g mask="url(#edges)">
+    <polygon points="26.1,10.7 34.3,15.4 34.3,24.8 26.1,29.5 18,24.8 18,15.4"/>
+    <polygon points="9.9,10.7 18,15.4 18,24.8 9.9,29.5 1.7,24.8 1.7,15.4"/>
+    <polygon points="18,15.4 26.1,20.1 26.1,29.5 18,34.2 9.9,29.5 9.9,20.1"/>
+    <polygon points="18,1.3 26.1,6 26.1,15.4 18,20.1 9.9,15.4 9.9,6"/>
   </g>
 </svg>

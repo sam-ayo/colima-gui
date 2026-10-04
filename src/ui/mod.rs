@@ -1,3 +1,4 @@
+pub mod app_icon;
 pub mod app_view;
 pub mod container_detail;
 pub mod container_list;

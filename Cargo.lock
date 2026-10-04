@@ -1021,6 +1021,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "raw-window-handle",
  "reqwest",
+ "resvg 0.46.0",
  "serde",
  "serde_json",
  "tokio",

@@ -160,6 +160,7 @@ pub fn sync_theme(window: &mut Window, cx: &mut App) {
         t.tab_active_foreground = c.label;
         t.tab_foreground = c.secondary_label;
     });
+    super::app_icon::update(c.accent, dark, platform::set_app_icon, cx);
     cx.set_global(SystemAccent {
         accent: c.accent,
         selection: c.selection,
@@ -308,12 +309,6 @@ pub fn has_emphasized_selection(cx: &App) -> bool {
 /// app, so the frame changes in a task, after the current update.
 pub fn autosave_frame(window: &Window, cx: &App) {
     platform::autosave_frame(window, "Colima Main Window", cx);
-}
-
-/// Sets the Dock icon. A bundled app gets the icon from its Info.plist, but
-/// `cargo run` starts the bare binary, which has no bundle.
-pub fn set_app_icon() {
-    platform::set_app_icon(include_bytes!("../../assets/icon/colima-gui.icns"));
 }
 
 /// Adds the standard macOS menus, and the key bindings that go with them.
@@ -785,11 +780,12 @@ mod platform {
             .detach();
     }
 
-    pub(super) fn set_app_icon(icns: &[u8]) {
+    /// Sets the Dock icon from the data of an image file, such as a PNG.
+    pub(super) fn set_app_icon(image: &[u8]) {
         let Some(mtm) = MainThreadMarker::new() else {
             return;
         };
-        let data = NSData::with_bytes(icns);
+        let data = NSData::with_bytes(image);
         let Some(image) = NSImage::initWithData(mtm.alloc(), &data) else {
             return;
         };
