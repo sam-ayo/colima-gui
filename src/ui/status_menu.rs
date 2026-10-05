@@ -254,7 +254,11 @@ fn engine_label(store: &ContainerStore) -> String {
             Some(p) if p != "default" => format!("Colima is running ({p})"),
             _ => "Colima is running".into(),
         },
-        EngineStatus::NotRunning => "Colima is stopped".into(),
+        // Other machines can run, so a stopped machine always shows its name.
+        EngineStatus::NotRunning => match store.profile() {
+            Some(p) => format!("{p} is stopped"),
+            None => "Colima is stopped".into(),
+        },
         EngineStatus::Error(_) => "Cannot connect to Docker".into(),
     }
 }

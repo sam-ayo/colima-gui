@@ -48,7 +48,7 @@ pub enum AccentColor {
 }
 
 impl AccentColor {
-    const COLORS: [AccentColor; 6] = [
+    pub const COLORS: [AccentColor; 6] = [
         AccentColor::Purple,
         AccentColor::Pink,
         AccentColor::Orange,
@@ -58,7 +58,7 @@ impl AccentColor {
     ];
 
     /// The menu label. The saved setting also uses it.
-    fn name(self) -> &'static str {
+    pub fn name(self) -> &'static str {
         match self {
             AccentColor::System => "System",
             AccentColor::Purple => "Purple",
@@ -79,6 +79,43 @@ impl AccentColor {
 
 impl Global for AccentColor {}
 
+/// The appearances that the View menu gives. `System` follows the
+/// appearance in System Settings. The app keeps the choice between launches.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+pub enum Appearance {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl Appearance {
+    pub const ALL: [Appearance; 3] = [Appearance::System, Appearance::Light, Appearance::Dark];
+
+    /// The menu label. The saved setting also uses it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Appearance::System => "System",
+            Appearance::Light => "Light",
+            Appearance::Dark => "Dark",
+        }
+    }
+
+    fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|a| a.name() == name)
+    }
+}
+
+impl Global for Appearance {}
+
+/// The key of the saved appearance in the user defaults.
+const APPEARANCE_KEY: &str = "Appearance";
+
+/// Changes the appearance and saves the choice.
+#[derive(Action, Clone, PartialEq, Deserialize)]
+#[action(namespace = native, no_json)]
+pub struct SetAppearance(pub Appearance);
+
 /// True when the app shows its status item in the menu bar. The app keeps
 /// the choice between launches.
 #[derive(Clone, Copy)]
@@ -92,7 +129,7 @@ const MENU_BAR_KEY: &str = "ShowInMenuBar";
 /// Changes the accent color and saves the choice.
 #[derive(Action, Clone, PartialEq, Deserialize)]
 #[action(namespace = native, no_json)]
-pub struct SetAccentColor(AccentColor);
+pub struct SetAccentColor(pub AccentColor);
 
 /// Sets the theme from the appearance of `window`, then puts the system
 /// colors and the chosen accent color on it. Call it again when the
@@ -232,6 +269,14 @@ pub struct SystemAccent {
 
 impl Global for SystemAccent {}
 
+/// The color of an accent color choice in the current appearance, for a
+/// swatch that shows the choice. `System` gives the accent color of System
+/// Settings. Other platforms give the theme blue.
+pub fn swatch(choice: AccentColor, cx: &App) -> Hsla {
+    let t = gpui_component::ActiveTheme::theme(cx);
+    platform::system_colors(t.is_dark(), choice).map_or(t.blue, |c| c.accent)
+}
+
 /// The chosen accent color, or the theme blue on other platforms.
 pub fn accent(cx: &App) -> Hsla {
     cx.try_global::<SystemAccent>()
@@ -312,7 +357,7 @@ pub fn autosave_frame(window: &Window, cx: &App) {
 }
 
 /// Adds the standard macOS menus, and the key bindings that go with them.
-/// Also reads the saved accent color.
+/// Also reads the saved accent color and the saved appearance.
 pub fn init_menus(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("cmd-q", Quit, None),
@@ -348,6 +393,22 @@ pub fn init_menus(cx: &mut App) {
         });
     });
 
+    cx.on_action(|a: &SetAppearance, cx| {
+        let choice = a.0;
+        save_string(APPEARANCE_KEY, choice.name());
+        cx.set_global(choice);
+        set_menus(cx);
+        // As with the accent color, change the theme after the current
+        // update. The windows then have the new appearance.
+        cx.defer(move |cx| {
+            platform::set_appearance(choice);
+            for handle in cx.windows() {
+                let _ = handle.update(cx, |_, window, cx| sync_theme(window, cx));
+            }
+            cx.refresh_windows();
+        });
+    });
+
     cx.on_action(|_: &ToggleMenuBarItem, cx| {
         let show = !cx.global::<ShowInMenuBar>().0;
         platform::save_string(MENU_BAR_KEY, if show { "1" } else { "0" });
@@ -357,6 +418,13 @@ pub fn init_menus(cx: &mut App) {
 
     let saved = platform::saved_accent().and_then(|name| AccentColor::from_name(&name));
     cx.set_global(saved.unwrap_or_default());
+    // Set the appearance before the window opens, so the first frame has
+    // the correct theme.
+    let appearance = saved_string(APPEARANCE_KEY)
+        .and_then(|name| Appearance::from_name(&name))
+        .unwrap_or_default();
+    platform::set_appearance(appearance);
+    cx.set_global(appearance);
     cx.set_global(ShowInMenuBar(platform::saved_string(MENU_BAR_KEY).as_deref() != Some("0")));
     set_menus(cx);
 }
@@ -374,6 +442,14 @@ fn set_menus(cx: &mut App) {
     let accent_item = |c: AccentColor| MenuItem::action(c.name(), SetAccentColor(c)).checked(c == current);
     let mut accent_items = vec![accent_item(AccentColor::System), MenuItem::separator()];
     accent_items.extend(AccentColor::COLORS.map(accent_item));
+    let current = cx.try_global::<Appearance>().copied().unwrap_or_default();
+    let appearance_item = |a: Appearance| MenuItem::action(a.name(), SetAppearance(a)).checked(a == current);
+    let appearance_items = vec![
+        appearance_item(Appearance::System),
+        MenuItem::separator(),
+        appearance_item(Appearance::Light),
+        appearance_item(Appearance::Dark),
+    ];
     let in_menu_bar = cx.try_global::<ShowInMenuBar>().is_some_and(|s| s.0);
 
     cx.set_menus([
@@ -417,6 +493,7 @@ fn set_menus(cx: &mut App) {
             MenuItem::separator(),
             MenuItem::action("Show Running Containers Only", ToggleRunningOnly),
             MenuItem::separator(),
+            MenuItem::submenu(Menu::new("Appearance").items(appearance_items)),
             MenuItem::submenu(Menu::new("Accent Color").items(accent_items)),
             MenuItem::action("Show in Menu Bar", ToggleMenuBarItem).checked(in_menu_bar),
             // AppKit adds "Enter Full Screen" to this menu.
@@ -665,6 +742,24 @@ mod platform {
         // SAFETY: a string is a property list value, so the defaults can
         // keep it.
         unsafe { NSUserDefaults::standardUserDefaults().setObject_forKey(Some(&value), &key) };
+    }
+
+    /// Sets the appearance of the app. The windows, the menus, and the
+    /// alerts all follow it. `System` removes the app appearance, so the
+    /// app follows System Settings again.
+    pub(super) fn set_appearance(choice: Appearance) {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let name = unsafe {
+            match choice {
+                Appearance::System => None,
+                Appearance::Light => Some(NSAppearanceNameAqua),
+                Appearance::Dark => Some(NSAppearanceNameDarkAqua),
+            }
+        };
+        let appearance = name.and_then(NSAppearance::appearanceNamed);
+        NSApplication::sharedApplication(mtm).setAppearance(appearance.as_deref());
     }
 
     pub(super) fn is_active() -> bool {
@@ -1027,6 +1122,7 @@ mod platform {
         None
     }
     pub(super) fn save_accent(_: &str) {}
+    pub(super) fn set_appearance(_: Appearance) {}
     pub(super) fn saved_string(_: &str) -> Option<String> {
         None
     }

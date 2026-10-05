@@ -1300,10 +1300,15 @@ impl AppView {
                     EngineStatus::Error(e) => Some(e.clone()),
                     _ => None,
                 };
+                // Other machines can run, so the title names this machine.
+                let title = match store.profile() {
+                    Some(p) => format!("{p} is off"),
+                    None => "Colima is off".into(),
+                };
                 let t = cx.theme();
                 empty_state(t)
                     .child(icon_tile(IconName::Power, t))
-                    .child(empty_title("Colima is off", t))
+                    .child(empty_title(title, t))
                     .children(detail.map(|detail| {
                         div().max_w(px(360.)).text_center().text_size(px(text::BODY)).child(detail)
                     }))
@@ -1350,12 +1355,12 @@ fn icon_tile(icon: IconName, t: &Theme) -> impl IntoElement {
         .child(Icon::new(icon).size(px(26.)).text_color(t.muted_foreground))
 }
 
-fn empty_title(text: &'static str, t: &Theme) -> impl IntoElement {
+fn empty_title(text: impl Into<SharedString>, t: &Theme) -> impl IntoElement {
     div()
         .text_size(px(text::TITLE2))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(t.foreground)
-        .child(text)
+        .child(text.into())
 }
 
 /// Adds a strip at the top that moves the window, for views that have no

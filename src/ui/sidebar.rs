@@ -1,5 +1,5 @@
-//! The left navigation: the Docker and Kubernetes sections, and the Colima
-//! machines.
+//! The left navigation: the Docker and Kubernetes sections, the Colima
+//! machines, and the settings button.
 
 use std::collections::HashSet;
 use std::rc::Rc;
@@ -10,7 +10,7 @@ use gpui_component::{ActiveTheme, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit_assets::IconName;
 
 use super::key_nav::{self, BoundsCell};
-use super::{SIDEBAR_INSET, SIDEBAR_RADIUS, TOOLBAR_HEIGHT, drag_area, native, spinner, text};
+use super::{SIDEBAR_INSET, SIDEBAR_RADIUS, TOOLBAR_HEIGHT, drag_area, native, settings, spinner, text};
 use crate::colima::Machine;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -270,7 +270,8 @@ impl RenderOnce for Sidebar {
                                 .map(|(ix, m)| self.render_machine(ix, m, cx)),
                         )
                     }),
-            );
+            )
+            .child(h_flex().flex_shrink_0().px_2p5().pb_2p5().child(settings::settings_button(cx)));
         div()
             .relative()
             .w(self.width + px(2. * SIDEBAR_INSET))

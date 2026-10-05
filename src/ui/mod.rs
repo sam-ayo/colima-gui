@@ -12,6 +12,7 @@ pub mod native;
 pub mod network_detail;
 pub mod network_list;
 pub mod quit;
+pub mod settings;
 pub mod sidebar;
 pub mod stats_view;
 pub mod status_menu;
