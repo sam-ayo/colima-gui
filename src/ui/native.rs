@@ -197,7 +197,11 @@ pub fn sync_theme(window: &mut Window, cx: &mut App) {
         t.tab_active_foreground = c.label;
         t.tab_foreground = c.secondary_label;
     });
-    super::app_icon::update(c.accent, dark, platform::set_app_icon, cx);
+    // The saved icons of the Dock tile plug-in need the accent color of
+    // the other appearance too.
+    let other = platform::system_colors(!dark, choice).map_or(c.accent, |o| o.accent);
+    let accents = if dark { [other, c.accent] } else { [c.accent, other] };
+    super::app_icon::set_theme(accents, dark, cx);
     cx.set_global(SystemAccent {
         accent: c.accent,
         selection: c.selection,
@@ -425,6 +429,7 @@ pub fn init_menus(cx: &mut App) {
         .unwrap_or_default();
     platform::set_appearance(appearance);
     cx.set_global(appearance);
+    super::app_icon::init(platform::is_dark(), cx);
     cx.set_global(ShowInMenuBar(platform::saved_string(MENU_BAR_KEY).as_deref() != Some("0")));
     set_menus(cx);
 }
@@ -520,6 +525,11 @@ pub fn saved_string(key: &str) -> Option<String> {
 
 pub fn save_string(key: &str, value: &str) {
     platform::save_string(key, value)
+}
+
+/// Sets the Dock icon from the data of an image file, such as a PNG.
+pub fn set_dock_icon(image: &[u8]) {
+    platform::set_app_icon(image)
 }
 
 /// True when the app is the active app, so that the user uses it now.
@@ -760,6 +770,15 @@ mod platform {
         };
         let appearance = name.and_then(NSAppearance::appearanceNamed);
         NSApplication::sharedApplication(mtm).setAppearance(appearance.as_deref());
+    }
+
+    /// True if the app has the dark appearance.
+    pub(super) fn is_dark() -> bool {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return false;
+        };
+        let name = NSApplication::sharedApplication(mtm).effectiveAppearance().name();
+        name.to_string().contains("Dark")
     }
 
     pub(super) fn is_active() -> bool {
@@ -1123,6 +1142,9 @@ mod platform {
     }
     pub(super) fn save_accent(_: &str) {}
     pub(super) fn set_appearance(_: Appearance) {}
+    pub(super) fn is_dark() -> bool {
+        false
+    }
     pub(super) fn saved_string(_: &str) -> Option<String> {
         None
     }

@@ -11,7 +11,7 @@
 # Output: "target/package/<arch>/Colima GUI.app",
 #         target/package/<arch>/colima-gui-<version>-<arch>.pkg, and
 #         target/package/<arch>/colima-gui-<version>-<arch>.zip
-# Needs: cargo, curl, and the Xcode command line tools (pkgbuild).
+# Needs: cargo, curl, and the Xcode command line tools (clang and pkgbuild).
 #
 # Signature and notarization. Without these variables, the script makes an
 # unsigned package, and Gatekeeper blocks it on other Macs.
@@ -99,6 +99,35 @@ mkdir -p "$app/Contents/MacOS" "$tools/bin"
 cp "$target/$rust_target/release/colima-gui" "$app/Contents/MacOS/colima-gui"
 cp "$root/assets/icon/colima-gui.icns" "$app/Contents/Resources/colima-gui.icns"
 
+# The Dock tile plug-in shows the icon of the selected theme when the app
+# does not run (see macos/DockTile/DockTile.m).
+plugin="$app/Contents/PlugIns/DockTile.docktileplugin"
+mkdir -p "$plugin/Contents/MacOS"
+clang -bundle -fobjc-arc -O2 -arch "$arch" -mmacosx-version-min=13.0 -framework AppKit \
+    -o "$plugin/Contents/MacOS/DockTile" "$root/macos/DockTile/DockTile.m"
+cat > "$plugin/Contents/Info.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>DockTile</string>
+    <key>CFBundleIdentifier</key>
+    <string>$BUNDLE_ID.docktile</string>
+    <key>CFBundleName</key>
+    <string>DockTile</string>
+    <key>CFBundlePackageType</key>
+    <string>BNDL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>$version</string>
+    <key>CFBundleVersion</key>
+    <string>$version</string>
+    <key>NSPrincipalClass</key>
+    <string>ColimaGUIDockTile</string>
+</dict>
+</plist>
+EOF
+
 # Lima finds its guest agents in ../share/lima, next to bin/limactl. Keep the
 # layout of the archive. Leave out the guest agent for macOS guests, because
 # Colima runs only Linux guests. It is an unsigned binary in a gzip file, and
@@ -134,6 +163,8 @@ cat > "$app/Contents/Info.plist" <<EOF
     <string>13.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSDockTilePlugIn</key>
+    <string>DockTile.docktileplugin</string>
 </dict>
 </plist>
 EOF
@@ -142,7 +173,8 @@ EOF
 # secure timestamp on all of the code. The tools have ad hoc signatures, so
 # sign them again. limactl has the virtualization entitlement, and a new
 # signature removes it. Thus copy the entitlements of each tool to its new
-# signature. Sign the bundle last, because its seal includes the tools.
+# signature. Sign the bundle last, because its seal includes the tools and
+# the Dock tile plug-in.
 if [ -n "${CODESIGN_IDENTITY:-}" ]; then
     echo "sign the app with $CODESIGN_IDENTITY"
     entitlements="$cache/entitlements.plist"
@@ -159,6 +191,8 @@ if [ -n "${CODESIGN_IDENTITY:-}" ]; then
         codesign --force --options runtime --timestamp \
             --sign "$CODESIGN_IDENTITY" "${args[@]+"${args[@]}"}" "$file"
     done
+    codesign --force --options runtime --timestamp \
+        --sign "$CODESIGN_IDENTITY" "$plugin"
     codesign --force --options runtime --timestamp \
         --sign "$CODESIGN_IDENTITY" "$app"
     codesign --verify --deep --strict "$app"

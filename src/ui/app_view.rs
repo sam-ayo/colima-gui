@@ -269,13 +269,15 @@ impl AppView {
             cx.observe(&machines, |this, machines, cx| {
                 // Load the rows of the other running machines, so a switch
                 // to them shows rows at once.
-                let sockets = machines
+                let sockets: Vec<_> = machines
                     .read(cx)
                     .machines
                     .iter()
                     .filter(|m| m.is_running())
                     .map(|m| crate::docker::profile_socket(&m.name))
                     .collect();
+                // The Dock icon is dim when no machine runs.
+                super::app_icon::set_running(!sockets.is_empty(), cx);
                 this.store.update(cx, |s, cx| s.prefetch(sockets, cx));
                 cx.notify();
             }),

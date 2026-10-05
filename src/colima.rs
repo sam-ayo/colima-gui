@@ -68,12 +68,40 @@ impl Machine {
     /// The configuration file of the profile. `colima start --edit`
     /// changes the same file.
     pub fn config_file(&self) -> Option<PathBuf> {
-        let home = std::env::var_os("COLIMA_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".colima")))?;
-        let file = home.join(&self.name).join("colima.yaml");
+        let file = home()?.join(&self.name).join("colima.yaml");
         file.is_file().then_some(file)
     }
+}
+
+/// The folder of the Colima profiles: `$COLIMA_HOME`, or `~/.colima`.
+fn home() -> Option<PathBuf> {
+    std::env::var_os("COLIMA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".colima")))
+}
+
+/// The folder of the Lima machines that Colima makes. Each machine has a
+/// folder in it.
+pub fn lima_home() -> Option<PathBuf> {
+    Some(home()?.join("_lima"))
+}
+
+/// True if a Colima machine runs. This check does not start the CLI, so it
+/// is fast. The Lima host agent of a running machine writes its process ID
+/// to `ha.pid`, and removes the file when the machine stops. The Dock tile
+/// plug-in (`macos/DockTile`) does the same check.
+pub fn any_running() -> bool {
+    let Some(Ok(dirs)) = lima_home().map(std::fs::read_dir) else {
+        return false;
+    };
+    dirs.flatten().any(|dir| {
+        std::fs::read_to_string(dir.path().join("ha.pid"))
+            .ok()
+            .and_then(|pid| pid.trim().parse::<libc::pid_t>().ok())
+            // SAFETY: signal 0 sends no signal. It only checks that the
+            // process exists.
+            .is_some_and(|pid| pid > 0 && unsafe { libc::kill(pid, 0) } == 0)
+    })
 }
 
 /// An action on a profile, as the `colima` commands give them.

@@ -4,9 +4,10 @@
 # Run it again after a change to the SVG, and commit both files.
 #
 # The app SVG is a template with color tokens. The running app fills them
-# from the theme (see src/ui/app_icon.rs). The bundle icon, which Finder
-# shows, gets the colors of the default theme: the Teal accent in the light
-# appearance. Keep these colors the same as the colors that the app makes.
+# from the theme, and saves the icons for the Dock tile plug-in (see
+# src/ui/app_icon.rs). The bundle icon, which Finder shows, gets the colors
+# of the default theme: the Teal accent in the light appearance. Keep these
+# colors the same as the colors that the app makes.
 #
 # Usage: scripts/icon.sh
 # Needs: rsvg-convert (brew install librsvg) and iconutil (macOS).
