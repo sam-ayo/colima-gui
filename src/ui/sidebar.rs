@@ -61,6 +61,8 @@ pub struct Sidebar {
     busy: HashSet<String>,
     /// The profile that the app connects to.
     current: String,
+    /// True when no machine runs. The sections then have no data to show.
+    sections_disabled: bool,
     /// The row at the keyboard cursor: the sections in the order of
     /// `Section::ALL`, then the machines. It is `None` when the sidebar does
     /// not have the focus.
@@ -84,6 +86,7 @@ impl Sidebar {
             machines: Vec::new(),
             busy: HashSet::new(),
             current: String::new(),
+            sections_disabled: false,
             cursor: None,
             cursor_bounds: BoundsCell::default(),
             on_hover: Rc::new(|_, _, _| {}),
@@ -104,6 +107,7 @@ impl Sidebar {
         self.machines = machines;
         self.busy = busy;
         self.current = current;
+        self.sections_disabled = !self.machines.is_empty() && !self.machines.iter().any(Machine::is_running);
         self.on_open = Rc::new(on_open);
         self.on_menu = Rc::new(on_menu);
         self
@@ -175,10 +179,25 @@ impl Sidebar {
             .when(cursor, |d| d.child(key_nav::track_bounds(self.cursor_bounds.clone())))
     }
 
-    fn render_section(&self, section: Section, cx: &App) -> impl IntoElement {
+    fn render_section(&self, section: Section, cx: &App) -> AnyElement {
+        let t = cx.theme();
+        let ix = Section::ALL.iter().position(|&s| s == section).unwrap_or_default();
+        if self.sections_disabled {
+            // A disabled row is gray, as a stopped machine is. It has no
+            // fill and does not answer the pointer.
+            return h_flex()
+                .id(section.label())
+                .h(px(28.))
+                .gap_2p5()
+                .px_2()
+                .text_size(px(text::BODY))
+                .text_color(t.muted_foreground)
+                .child(Icon::new(section.icon()).small().text_color(t.muted_foreground))
+                .child(div().flex_1().child(section.label()))
+                .into_any_element();
+        }
         let active = section == self.active;
         let on_select = self.on_select.clone();
-        let ix = Section::ALL.iter().position(|&s| s == section).unwrap_or_default();
         self.item(section.label(), ix, active, cx)
             .child(Icon::new(section.icon()).small().text_color(native::accent(cx)))
             .child(div().flex_1().child(section.label()))
@@ -186,6 +205,7 @@ impl Sidebar {
             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                 on_select(section, window, cx)
             })
+            .into_any_element()
     }
 
     fn render_machine(&self, ix: usize, machine: &Machine, cx: &App) -> impl IntoElement {
