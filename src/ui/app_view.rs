@@ -47,9 +47,7 @@ actions!(
         ShowContainers,
         ShowVolumes,
         ShowImages,
-        ShowNetworks,
-        ShowPods,
-        ShowServices
+        ShowNetworks
     ]
 );
 
@@ -125,8 +123,6 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-2", ShowVolumes, None),
         KeyBinding::new("cmd-3", ShowImages, None),
         KeyBinding::new("cmd-4", ShowNetworks, None),
-        KeyBinding::new("cmd-5", ShowPods, None),
-        KeyBinding::new("cmd-6", ShowServices, None),
     ]);
 }
 
@@ -480,15 +476,13 @@ impl AppView {
         }
     }
 
-    /// Moves the focus to the list of the current section. A section with
-    /// no list gives the focus to the sidebar, so the keys still work.
+    /// Moves the focus to the list of the current section.
     fn focus_list(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.section {
             Section::Containers => self.list.focus_handle(cx).focus(window, cx),
             Section::Volumes => self.volume_list.focus_handle(cx).focus(window, cx),
             Section::Images => self.image_list.focus_handle(cx).focus(window, cx),
             Section::Networks => self.network_list.focus_handle(cx).focus(window, cx),
-            _ => self.focus_sidebar(window, cx),
         }
     }
 
@@ -525,7 +519,6 @@ impl AppView {
                     d.update(cx, |d, cx| d.focus_in(window, cx));
                 }
             }
-            _ => {}
         }
     }
 
@@ -589,7 +582,6 @@ impl AppView {
                     d.update(cx, |d, cx| d.cycle_tab(delta, cx));
                 }
             }
-            _ => {}
         }
     }
 
@@ -617,7 +609,6 @@ impl AppView {
                     d.update(cx, |d, cx| d.set_tab_at(ix, cx));
                 }
             }
-            _ => {}
         }
     }
 
@@ -653,7 +644,6 @@ impl AppView {
             Section::Volumes => self.volume_detail.clone().map(Into::into),
             Section::Images => self.image_detail.clone().map(Into::into),
             Section::Networks => self.network_detail.clone().map(Into::into),
-            _ => None,
         }
     }
 
@@ -909,7 +899,6 @@ impl AppView {
             Section::Volumes => self.volume_list.update(cx, |l, cx| l.clear_selection(cx)),
             Section::Images => self.image_list.update(cx, |l, cx| l.clear_selection(cx)),
             Section::Networks => self.network_list.update(cx, |l, cx| l.clear_selection(cx)),
-            _ => {}
         }
     }
 
@@ -976,12 +965,6 @@ impl AppView {
             entries.push(item("Restart", idle, action(MachineAction::Restart)));
             entries.push(item("Force Stop", idle, action(MachineAction::ForceStop)));
             entries.push(separator());
-            if machine.kubernetes {
-                entries.push(item("Stop Kubernetes", idle, action(MachineAction::StopKubernetes)));
-                entries.push(item("Reset Kubernetes…", idle, action(MachineAction::ResetKubernetes)));
-            } else {
-                entries.push(item("Start Kubernetes", idle, action(MachineAction::StartKubernetes)));
-            }
             entries.push(item("Update Container Runtime", idle, action(MachineAction::Update)));
         } else {
             entries.push(item("Start", idle, action(MachineAction::Start)));
@@ -1020,8 +1003,8 @@ impl AppView {
         });
     }
 
-    /// Runs an action on a profile. A delete and a Kubernetes reset ask for
-    /// confirmation first, because they cannot be undone.
+    /// Runs an action on a profile. A delete asks for confirmation first,
+    /// because it cannot be undone.
     fn request_machine_action(
         &mut self,
         name: &str,
@@ -1035,11 +1018,6 @@ impl AppView {
                 format!("Delete “{name}”?"),
                 "Colima stops the machine and deletes it and its settings. The container data stays. You cannot undo this.",
                 "Delete",
-            ),
-            MachineAction::ResetKubernetes => (
-                format!("Reset Kubernetes on “{name}”?"),
-                "Colima deletes the Kubernetes cluster and all its resources, and then makes a new cluster. You cannot undo this.",
-                "Reset",
             ),
             _ => {
                 machines.update(cx, |m, cx| m.run(name, action, cx));
@@ -1176,7 +1154,6 @@ impl AppView {
                 }
                 None => return,
             },
-            _ => return,
         };
         // The pane of a hidden section goes away with no exit.
         if section != self.section {
@@ -1423,14 +1400,7 @@ impl Render for AppView {
             },
         );
 
-        let main = if !self.section.is_available() {
-            with_drag_area(
-                empty_state(&t)
-                    .child(icon_tile(self.section.icon(), &t))
-                    .child(empty_title(self.section.label(), &t))
-                    .child(div().text_size(px(text::BODY)).child("This section comes in a later version.")),
-            )
-        } else if let Some(state) = self.render_engine_state(cx) {
+        let main = if let Some(state) = self.render_engine_state(cx) {
             with_drag_area(state)
         } else {
             let list: AnyView = match self.section {
@@ -1608,8 +1578,6 @@ impl Render for AppView {
             .on_action(cx.listener(|this, _: &ShowVolumes, w, cx| this.set_section(Section::Volumes, w, cx)))
             .on_action(cx.listener(|this, _: &ShowImages, w, cx| this.set_section(Section::Images, w, cx)))
             .on_action(cx.listener(|this, _: &ShowNetworks, w, cx| this.set_section(Section::Networks, w, cx)))
-            .on_action(cx.listener(|this, _: &ShowPods, w, cx| this.set_section(Section::Pods, w, cx)))
-            .on_action(cx.listener(|this, _: &ShowServices, w, cx| this.set_section(Section::Services, w, cx)))
             .on_action(cx.listener(|_, _: &native::CloseWindow, _, cx| {
                 if !quit::is_quitting(cx) {
                     cx.propagate();

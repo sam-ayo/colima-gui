@@ -9,8 +9,6 @@ use serde::Deserialize;
 #[derive(Debug, Deserialize)]
 struct Status {
     docker_socket: Option<String>,
-    #[serde(default)]
-    kubernetes: bool,
 }
 
 /// A GUI app gets a short PATH. Add the usual Homebrew locations so that
@@ -54,10 +52,6 @@ pub fn docker_socket() -> Option<String> {
 pub struct Machine {
     pub name: String,
     pub status: String,
-    /// True if Kubernetes runs in the machine. `colima list` does not tell
-    /// this, so `list` gets it from `colima status`.
-    #[serde(default)]
-    pub kubernetes: bool,
 }
 
 impl Machine {
@@ -114,10 +108,6 @@ pub enum MachineAction {
     Restart,
     /// Updates the container runtime in the machine.
     Update,
-    StartKubernetes,
-    StopKubernetes,
-    /// Deletes the Kubernetes cluster and makes a new one.
-    ResetKubernetes,
     /// Deletes the machine. The container data stays, as with
     /// `colima delete` without `--data`.
     Delete,
@@ -131,9 +121,6 @@ impl MachineAction {
             MachineAction::ForceStop => &["stop", "--force"],
             MachineAction::Restart => &["restart"],
             MachineAction::Update => &["update"],
-            MachineAction::StartKubernetes => &["kubernetes", "start"],
-            MachineAction::StopKubernetes => &["kubernetes", "stop"],
-            MachineAction::ResetKubernetes => &["kubernetes", "reset"],
             MachineAction::Delete => &["delete", "--force"],
         }
     }
@@ -153,19 +140,7 @@ pub fn list() -> Vec<Machine> {
     if !out.status.success() {
         return Vec::new();
     }
-    let mut list = parse_list(&String::from_utf8_lossy(&out.stdout));
-    for m in list.iter_mut().filter(|m| m.is_running()) {
-        m.kubernetes = status(&m.name).is_some_and(|s| s.kubernetes);
-    }
-    list
-}
-
-fn status(profile: &str) -> Option<Status> {
-    let out = colima().args(["status", "--json", "--profile", profile]).output().ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    serde_json::from_slice(&out.stdout).ok()
+    parse_list(&String::from_utf8_lossy(&out.stdout))
 }
 
 fn parse_list(text: &str) -> Vec<Machine> {
@@ -370,13 +345,13 @@ mod tests {
         let text = concat!(
             r#"{"name":"default","status":"Running","arch":"aarch64","cpus":4}"#,
             "\n",
-            r#"{"name":"k8s-lab","status":"Stopped","arch":"aarch64","cpus":2}"#,
+            r#"{"name":"dev","status":"Stopped","arch":"aarch64","cpus":2}"#,
             "\n",
         );
         let list = parse_list(text);
         assert_eq!(list.len(), 2);
         assert!(list[0].is_running());
-        assert_eq!(list[1].name, "k8s-lab");
+        assert_eq!(list[1].name, "dev");
         assert!(!list[1].is_running());
     }
 }

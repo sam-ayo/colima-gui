@@ -436,7 +436,7 @@ pub fn init_menus(cx: &mut App) {
 
 fn set_menus(cx: &mut App) {
     use crate::ui::app_view::{
-        ShowContainers, ShowImages, ShowNetworks, ShowPods, ShowServices, ShowVolumes, ToggleSidebar,
+        ShowContainers, ShowImages, ShowNetworks, ShowVolumes, ToggleSidebar,
     };
     use crate::ui::key_nav::{NextTab, PrevTab};
     use crate::ui::container_list::{
@@ -490,8 +490,6 @@ fn set_menus(cx: &mut App) {
             MenuItem::action("Volumes", ShowVolumes),
             MenuItem::action("Images", ShowImages),
             MenuItem::action("Networks", ShowNetworks),
-            MenuItem::action("Pods", ShowPods),
-            MenuItem::action("Services", ShowServices),
             MenuItem::separator(),
             MenuItem::action("Show Next Tab", NextTab),
             MenuItem::action("Show Previous Tab", PrevTab),

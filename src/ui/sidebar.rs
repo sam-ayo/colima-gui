@@ -1,4 +1,4 @@
-//! The left navigation: the Docker and Kubernetes sections, the Colima
+//! The left navigation: the Docker sections, the Colima
 //! machines, and the settings button.
 
 use std::collections::HashSet;
@@ -19,26 +19,15 @@ pub enum Section {
     Volumes,
     Images,
     Networks,
-    Pods,
-    Services,
 }
 
 impl Section {
-    const DOCKER: [Section; 4] = [
-        Section::Containers,
-        Section::Volumes,
-        Section::Images,
-        Section::Networks,
-    ];
-    const KUBERNETES: [Section; 2] = [Section::Pods, Section::Services];
     /// All the sections, in the order of the sidebar.
-    pub const ALL: [Section; 6] = [
+    pub const ALL: [Section; 4] = [
         Section::Containers,
         Section::Volumes,
         Section::Images,
         Section::Networks,
-        Section::Pods,
-        Section::Services,
     ];
 
     pub fn label(self) -> &'static str {
@@ -47,8 +36,6 @@ impl Section {
             Section::Volumes => "Volumes",
             Section::Images => "Images",
             Section::Networks => "Networks",
-            Section::Pods => "Pods",
-            Section::Services => "Services",
         }
     }
 
@@ -58,14 +45,7 @@ impl Section {
             Section::Volumes => IconName::Database,
             Section::Images => IconName::Layers,
             Section::Networks => IconName::Globe,
-            Section::Pods => IconName::Hexagon,
-            Section::Services => IconName::Server,
         }
-    }
-
-    /// The sections that exist now. The others show a placeholder.
-    pub fn is_available(self) -> bool {
-        matches!(self, Section::Containers | Section::Volumes | Section::Images | Section::Networks)
     }
 }
 
@@ -259,9 +239,7 @@ impl RenderOnce for Sidebar {
                     .pb_2()
                     .gap_px()
                     .child(Self::heading("Docker", cx).pt_0())
-                    .children(Section::DOCKER.map(|s| self.render_section(s, cx)))
-                    .child(Self::heading("Kubernetes", cx))
-                    .children(Section::KUBERNETES.map(|s| self.render_section(s, cx)))
+                    .children(Section::ALL.map(|s| self.render_section(s, cx)))
                     .when(!self.machines.is_empty(), |d| {
                         d.child(Self::heading("Machines", cx)).children(
                             self.machines
