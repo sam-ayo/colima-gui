@@ -51,6 +51,12 @@ impl MachineStore {
         }
     }
 
+    /// True when the list has machines and none of them runs. The Docker
+    /// sections are then disabled.
+    pub fn all_off(&self) -> bool {
+        !self.machines.is_empty() && !self.machines.iter().any(Machine::is_running)
+    }
+
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         let rx = Backend::global(cx).spawn(async { tokio::task::spawn_blocking(colima::list).await });
         cx.spawn(async move |this, cx| {

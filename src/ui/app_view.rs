@@ -490,7 +490,12 @@ impl AppView {
     /// section. A collapsed sidebar opens.
     fn focus_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.set_sidebar_collapsed(false, cx);
-        self.sidebar_cursor = Section::ALL.iter().position(|&s| s == self.section).unwrap_or(0);
+        // The cursor skips the sections when they are disabled.
+        self.sidebar_cursor = if self.machines.read(cx).all_off() {
+            Section::ALL.len()
+        } else {
+            Section::ALL.iter().position(|&s| s == self.section).unwrap_or(0)
+        };
         self.sidebar_focus.focus(window, cx);
         cx.notify();
     }
@@ -528,8 +533,11 @@ impl AppView {
     }
 
     fn move_sidebar(&mut self, m: Move, cx: &mut Context<Self>) {
-        if let Some(ix) = m.apply(Some(self.sidebar_cursor), self.sidebar_rows(cx)) {
-            self.sidebar_cursor = ix;
+        // The cursor skips the sections when they are disabled.
+        let first = if self.machines.read(cx).all_off() { Section::ALL.len() } else { 0 };
+        let current = self.sidebar_cursor.checked_sub(first);
+        if let Some(ix) = m.apply(current, self.sidebar_rows(cx) - first) {
+            self.sidebar_cursor = first + ix;
             cx.notify();
         }
     }
@@ -614,6 +622,10 @@ impl AppView {
 
     /// Shows a section, and moves the focus to its list.
     fn set_section(&mut self, section: Section, window: &mut Window, cx: &mut Context<Self>) {
+        // The sections are disabled when no machine runs.
+        if self.machines.read(cx).all_off() {
+            return;
+        }
         self.section = section;
         if section == Section::Volumes {
             self.volumes.update(cx, |v, cx| v.activate(cx));
