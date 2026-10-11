@@ -8,6 +8,8 @@ pub mod image_icon;
 pub mod json_view;
 pub mod key_nav;
 pub mod logs_view;
+pub mod machine_form;
+pub mod modal;
 pub mod native;
 pub mod network_detail;
 pub mod network_list;

@@ -116,6 +116,9 @@ pub enum MachineAction {
     /// Deletes the machine. The container data stays, as with
     /// `colima delete` without `--data`.
     Delete,
+    /// Deletes the machine and its container data: the images, the
+    /// containers, and the volumes.
+    DeleteWithData,
 }
 
 impl MachineAction {
@@ -127,12 +130,16 @@ impl MachineAction {
             MachineAction::Restart => &["restart"],
             MachineAction::Update => &["update"],
             MachineAction::Delete => &["delete", "--force"],
+            MachineAction::DeleteWithData => &["delete", "--force", "--data"],
         }
     }
 
     /// True if the engine runs when the action ends.
     pub fn leaves_engine_running(self) -> bool {
-        !matches!(self, MachineAction::Stop | MachineAction::ForceStop | MachineAction::Delete)
+        !matches!(
+            self,
+            MachineAction::Stop | MachineAction::ForceStop | MachineAction::Delete | MachineAction::DeleteWithData
+        )
     }
 }
 
@@ -189,6 +196,330 @@ pub fn stop_running(force: bool) -> Result<()> {
             .collect::<Result<Vec<()>>>()
             .map(drop)
     })
+}
+
+/// The container runtime of a machine.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Runtime {
+    #[default]
+    Docker,
+    Containerd,
+}
+
+impl Runtime {
+    pub const ALL: [Runtime; 2] = [Runtime::Docker, Runtime::Containerd];
+
+    /// The value of `--runtime` and of `runtime:` in `colima.yaml`.
+    pub fn arg(self) -> &'static str {
+        match self {
+            Runtime::Docker => "docker",
+            Runtime::Containerd => "containerd",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Runtime::Docker => "Docker",
+            Runtime::Containerd => "containerd",
+        }
+    }
+}
+
+/// The virtualization of a machine. `vz` is the Apple Virtualization
+/// framework. `qemu` is slower, but it can emulate other architectures.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum VmType {
+    #[default]
+    Vz,
+    Qemu,
+}
+
+impl VmType {
+    pub const ALL: [VmType; 2] = [VmType::Vz, VmType::Qemu];
+
+    /// The value of `--vm-type` and of `vmType:` in `colima.yaml`.
+    pub fn arg(self) -> &'static str {
+        match self {
+            VmType::Vz => "vz",
+            VmType::Qemu => "qemu",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            VmType::Vz => "Apple Virtualization (vz)",
+            VmType::Qemu => "QEMU",
+        }
+    }
+}
+
+/// A folder of the Mac that the machine can read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Mount {
+    pub location: String,
+    pub writable: bool,
+}
+
+/// The settings of a machine that the app can change. The other settings
+/// in `colima.yaml` keep their values.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Settings {
+    pub cpus: u32,
+    /// The memory in GiB.
+    pub memory: f32,
+    /// The disk size in GiB.
+    pub disk: u32,
+    pub runtime: Runtime,
+    pub vm_type: VmType,
+    /// Rosetta runs x86_64 programs in the machine. It needs `vz`.
+    pub rosetta: bool,
+    /// An empty list uses the default mounts of Colima.
+    pub mounts: Vec<Mount>,
+}
+
+impl Default for Settings {
+    /// The defaults of `colima start`.
+    fn default() -> Self {
+        Settings {
+            cpus: 2,
+            memory: 2.,
+            disk: 100,
+            runtime: Runtime::Docker,
+            vm_type: VmType::Vz,
+            rosetta: false,
+            mounts: Vec::new(),
+        }
+    }
+}
+
+impl Settings {
+    /// The `colima start` flags for these settings. `--mount` replaces all
+    /// the mounts, so the flags have no mount for an empty list.
+    fn args(&self) -> Vec<String> {
+        let mut args = vec![
+            "--cpus".to_string(),
+            self.cpus.to_string(),
+            "--memory".into(),
+            format_gib(self.memory),
+            "--disk".into(),
+            self.disk.to_string(),
+            "--runtime".into(),
+            self.runtime.arg().into(),
+            "--vm-type".into(),
+            self.vm_type.arg().into(),
+            format!("--vz-rosetta={}", self.rosetta && self.vm_type == VmType::Vz),
+        ];
+        for m in &self.mounts {
+            args.push("--mount".into());
+            args.push(if m.writable { format!("{}:w", m.location) } else { m.location.clone() });
+        }
+        args
+    }
+}
+
+/// A size in GiB, with no fraction if it is a whole number.
+pub fn format_gib(gib: f32) -> String {
+    if gib.fract() == 0. { format!("{gib:.0}") } else { format!("{gib}") }
+}
+
+impl Machine {
+    /// Reads the settings from `colima.yaml`. A missing value keeps the
+    /// default.
+    pub fn settings(&self) -> Option<Settings> {
+        let text = std::fs::read_to_string(self.config_file()?).ok()?;
+        Some(parse_settings(&text))
+    }
+}
+
+/// Reads the top-level keys of `colima.yaml` that `Settings` has. Colima
+/// writes the file, so a full YAML parser is not necessary.
+fn parse_settings(text: &str) -> Settings {
+    let mut s = Settings::default();
+    let mut in_mounts = false;
+    for line in text.lines() {
+        let line = line.split(" #").next().unwrap_or(line).trim_end();
+        if line.trim_start().starts_with('#') || line.trim().is_empty() {
+            continue;
+        }
+        let top = !line.starts_with(' ') && !line.starts_with('-');
+        if top {
+            in_mounts = false;
+            let Some((key, value)) = line.split_once(':') else { continue };
+            let value = value.trim().trim_matches(|c| c == '"' || c == '\'');
+            match key {
+                "cpu" => s.cpus = value.parse().unwrap_or(s.cpus),
+                "memory" => s.memory = value.parse().unwrap_or(s.memory),
+                "disk" => s.disk = value.parse().unwrap_or(s.disk),
+                "runtime" => {
+                    s.runtime = Runtime::ALL.into_iter().find(|r| r.arg() == value).unwrap_or(s.runtime)
+                }
+                "vmType" => s.vm_type = VmType::ALL.into_iter().find(|v| v.arg() == value).unwrap_or(s.vm_type),
+                "rosetta" => s.rosetta = value == "true",
+                "mounts" => in_mounts = value.is_empty(),
+                _ => {}
+            }
+            continue;
+        }
+        if !in_mounts {
+            continue;
+        }
+        let item = line.trim_start();
+        let (new, item) = match item.strip_prefix("- ") {
+            Some(rest) => (true, rest.trim_start()),
+            None => (false, item),
+        };
+        if new {
+            s.mounts.push(Mount { location: String::new(), writable: false });
+        }
+        let Some(mount) = s.mounts.last_mut() else { continue };
+        let Some((key, value)) = item.split_once(':') else { continue };
+        let value = value.trim().trim_matches(|c| c == '"' || c == '\'');
+        match key.trim() {
+            "location" => mount.location = value.to_string(),
+            "writable" => mount.writable = value == "true",
+            _ => {}
+        }
+    }
+    s.mounts.retain(|m| !m.location.is_empty());
+    s
+}
+
+/// Replaces the `mounts:` block of `colima.yaml` with an empty list. The
+/// machine then uses the default mounts of Colima. `colima start` cannot do
+/// this, because a start without `--mount` keeps the saved mounts.
+fn clear_mounts(text: &str) -> String {
+    let mut out = Vec::new();
+    let mut skip = false;
+    for line in text.lines() {
+        let top = !line.starts_with(' ') && !line.starts_with('-') && !line.trim().is_empty();
+        if skip && !top {
+            continue;
+        }
+        skip = false;
+        if top && line.starts_with("mounts:") {
+            out.push("mounts: []".to_string());
+            skip = true;
+            continue;
+        }
+        out.push(line.to_string());
+    }
+    let mut text = out.join("\n");
+    text.push('\n');
+    text
+}
+
+/// True if `name` can be the name of a new profile. Colima uses the name
+/// in file and folder names.
+pub fn valid_profile_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with(['-', '.', '_'])
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+/// Makes and starts a new profile, and waits until the command finishes.
+pub fn create(profile: &str, settings: &Settings) -> Result<()> {
+    let mut args = vec!["start".to_string(), "--profile".into(), profile.into()];
+    args.extend(settings.args());
+    run(&args.iter().map(String::as_str).collect::<Vec<_>>())
+}
+
+/// Changes the settings of a profile. Colima reads the settings when the
+/// machine starts, so a running machine stops first. The runtime and the
+/// VM type of a machine cannot change, so the call keeps them.
+pub fn configure(profile: &str, old: &Settings, new: &Settings, running: bool) -> Result<()> {
+    if running {
+        run_action(profile, MachineAction::Stop)?;
+    }
+    if new.mounts.is_empty()
+        && !old.mounts.is_empty()
+        && let Some(file) = home().map(|h| h.join(profile).join("colima.yaml"))
+    {
+        let text = std::fs::read_to_string(&file).context("could not read colima.yaml")?;
+        std::fs::write(&file, clear_mounts(&text)).context("could not change colima.yaml")?;
+    }
+    let settings = Settings { runtime: old.runtime, vm_type: old.vm_type, ..new.clone() };
+    create(profile, &settings)
+}
+
+/// The processor count and the memory of the Mac, in GiB. These are the
+/// limits for a machine.
+pub fn host_resources() -> (u32, f32) {
+    let cpus = std::thread::available_parallelism().map_or(4, |n| n.get() as u32);
+    let mut memsize: u64 = 0;
+    let mut len = std::mem::size_of::<u64>();
+    // SAFETY: `hw.memsize` is a 64-bit value, and `len` gives the size of
+    // the buffer.
+    let ok = unsafe {
+        libc::sysctlbyname(
+            c"hw.memsize".as_ptr(),
+            (&raw mut memsize).cast(),
+            &raw mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    } == 0;
+    let memory = if ok { memsize as f32 / (1u64 << 30) as f32 } else { 8. };
+    (cpus, memory)
+}
+
+/// The counters of the resource use in a machine, from one read.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct UsageCounters {
+    /// The CPU time of all the processors, in clock ticks.
+    pub cpu_total: u64,
+    pub cpu_idle: u64,
+    pub cpus: u32,
+    pub mem_total: u64,
+    pub mem_used: u64,
+    /// The disk that has the container data.
+    pub disk_total: u64,
+    pub disk_used: u64,
+}
+
+/// The script that reads the counters in the VM. The disk is the one that
+/// keeps the container data.
+const USAGE_SCRIPT: &str = r#"head -n1 /proc/stat; grep -E '^(MemTotal|MemAvailable):' /proc/meminfo; for d in /var/lib/docker /var/lib/containerd /; do if [ -d "$d" ]; then df -Pk "$d"; break; fi; done; nproc"#;
+
+/// Reads the resource counters of a running profile.
+pub fn usage(profile: &str) -> Result<UsageCounters> {
+    let out = colima()
+        .args(["ssh", "--profile", profile, "--", "sh", "-c", USAGE_SCRIPT])
+        .output()
+        .context("could not run `colima`. Make sure that it is on the PATH")?;
+    if !out.status.success() {
+        bail!("could not read the resource use of “{profile}”");
+    }
+    parse_usage(&String::from_utf8_lossy(&out.stdout)).context("could not read the resource use")
+}
+
+fn parse_usage(text: &str) -> Option<UsageCounters> {
+    let mut u = UsageCounters::default();
+    let mut lines = text.lines();
+    // cpu  user nice system idle iowait irq softirq steal ...
+    let cpu: Vec<u64> = lines.next()?.split_whitespace().skip(1).filter_map(|v| v.parse().ok()).collect();
+    if cpu.len() < 5 {
+        return None;
+    }
+    // The guest time is in the user time already, so the first eight
+    // fields are the total.
+    u.cpu_total = cpu.iter().take(8).sum();
+    u.cpu_idle = cpu[3] + cpu[4];
+    let mut available = 0;
+    for line in lines {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        match fields.as_slice() {
+            ["MemTotal:", kb, ..] => u.mem_total = kb.parse::<u64>().ok()? * 1024,
+            ["MemAvailable:", kb, ..] => available = kb.parse::<u64>().ok()? * 1024,
+            [dev, total, used, _, _, _] if dev.starts_with('/') => {
+                u.disk_total = total.parse::<u64>().ok()? * 1024;
+                u.disk_used = used.parse::<u64>().ok()? * 1024;
+            }
+            [n] => u.cpus = n.parse().unwrap_or(0),
+            _ => {}
+        }
+    }
+    u.mem_used = u.mem_total.saturating_sub(available);
+    Some(u)
 }
 
 /// Opens a Terminal window with `colima ssh` for a profile. A `.command`
@@ -343,6 +674,71 @@ mod tests {
         assert_eq!(entries[0].kind, EntryKind::Folder);
         assert_eq!(entries[2].size, 416);
         assert_eq!(entries[2].modified, 1_788_353_434);
+    }
+
+    #[test]
+    fn settings_come_from_colima_yaml() {
+        let text = "# Number of CPUs\ncpu: 4\ndisk: 60\nmemory: 2.5\narch: aarch64\nruntime: containerd\n\
+            kubernetes:\n  enabled: false\nvmType: qemu\nrosetta: true\nmounts:\n  - location: ~/src\n    \
+            writable: true\n  - location: /tmp/x\nmountType: virtiofs\n";
+        let s = parse_settings(text);
+        assert_eq!(s.cpus, 4);
+        assert_eq!(s.disk, 60);
+        assert_eq!(s.memory, 2.5);
+        assert_eq!(s.runtime, Runtime::Containerd);
+        assert_eq!(s.vm_type, VmType::Qemu);
+        assert!(s.rosetta);
+        assert_eq!(
+            s.mounts,
+            [
+                Mount { location: "~/src".into(), writable: true },
+                Mount { location: "/tmp/x".into(), writable: false },
+            ]
+        );
+        assert!(parse_settings("mounts: []\n").mounts.is_empty());
+    }
+
+    #[test]
+    fn settings_become_start_flags() {
+        let s = Settings {
+            memory: 1.5,
+            mounts: vec![Mount { location: "/a b".into(), writable: true }],
+            ..Settings::default()
+        };
+        let args = s.args();
+        assert_eq!(args[..6], ["--cpus", "2", "--memory", "1.5", "--disk", "100"]);
+        assert!(args.contains(&"--vz-rosetta=false".to_string()));
+        assert_eq!(args[args.len() - 2..], ["--mount", "/a b:w"]);
+    }
+
+    #[test]
+    fn clearing_mounts_keeps_the_other_keys() {
+        let text = "cpu: 2\nmounts:\n  - location: /a\n    writable: true\nmountType: sshfs\n";
+        assert_eq!(clear_mounts(text), "cpu: 2\nmounts: []\nmountType: sshfs\n");
+    }
+
+    #[test]
+    fn profile_names_are_safe() {
+        assert!(valid_profile_name("dev-2.x_y"));
+        assert!(!valid_profile_name(""));
+        assert!(!valid_profile_name("-x"));
+        assert!(!valid_profile_name("a b"));
+        assert!(!valid_profile_name("a/b"));
+    }
+
+    #[test]
+    fn usage_comes_from_proc_and_df() {
+        let text = "cpu  758 0 646 128472 139 0 58 0 0 0\nMemTotal:        3999652 kB\n\
+            MemAvailable:    3575804 kB\nFilesystem     1024-blocks    Used Available Capacity Mounted on\n\
+            /dev/vdb1         40971488 1619560  37238496       5% /var/lib/docker\n2\n";
+        let u = parse_usage(text).unwrap();
+        assert_eq!(u.cpu_total, 758 + 646 + 128472 + 139 + 58);
+        assert_eq!(u.cpu_idle, 128472 + 139);
+        assert_eq!(u.cpus, 2);
+        assert_eq!(u.mem_total, 3999652 * 1024);
+        assert_eq!(u.mem_used, (3999652 - 3575804) * 1024);
+        assert_eq!(u.disk_total, 40971488 * 1024);
+        assert_eq!(u.disk_used, 1619560 * 1024);
     }
 
     #[test]

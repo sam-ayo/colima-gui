@@ -41,6 +41,7 @@ fn main() {
         cx.set_global(backend);
         cx.set_global(early);
         gpui_component::init(cx);
+        ui::modal::init(cx);
         ui::image_icon::LogoStore::init(cx);
         ui::sync_reduce_motion(cx);
         ui::key_nav::bind_keys(cx);

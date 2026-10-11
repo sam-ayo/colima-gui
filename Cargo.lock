@@ -1010,6 +1010,7 @@ dependencies = [
  "chrono",
  "ed25519-dalek",
  "futures",
+ "gpui-base",
  "gpui-component",
  "gpui-kit-assets",
  "gpui-pre",

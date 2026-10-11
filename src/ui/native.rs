@@ -436,7 +436,7 @@ pub fn init_menus(cx: &mut App) {
 
 fn set_menus(cx: &mut App) {
     use crate::ui::app_view::{
-        ShowContainers, ShowImages, ShowNetworks, ShowVolumes, ToggleSidebar,
+        NewMachine, ShowContainers, ShowImages, ShowNetworks, ShowVolumes, ToggleSidebar,
     };
     use crate::ui::key_nav::{NextTab, PrevTab};
     use crate::ui::container_list::{
@@ -472,6 +472,7 @@ fn set_menus(cx: &mut App) {
             MenuItem::action("Quit Completely", QuitCompletely),
         ]),
         Menu::new("File").items([
+            MenuItem::action("New Machine…", NewMachine),
             MenuItem::action("Open Compose File…", OpenComposeFile),
             MenuItem::separator(),
             MenuItem::action("Close Window", CloseWindow),

@@ -18,6 +18,7 @@ use crate::state::image_store::{ImageEvent, ImageStore};
 use crate::state::machine_store::{MachineEvent, MachineStore};
 use crate::state::network_store::{NetworkEvent, NetworkStore};
 use crate::state::stats_store::StatsStore;
+use crate::state::usage_store::UsageStore;
 use crate::state::volume_store::{VolumeEvent, VolumeStore};
 use crate::ui::container_detail::{ContainerDetail, DetailEvent};
 use crate::ui::container_list::{ContainerList, ListEvent, OpenComposeFile};
@@ -32,7 +33,7 @@ use crate::ui::status_menu::{StatusMenu, StatusMenuEvent};
 use crate::ui::volume_detail::{VolumeDetail, VolumeDetailEvent};
 use crate::ui::volume_list::{VolumeList, VolumeListEvent};
 use crate::ui::{
-    NATIVE_BUTTON_HEIGHT, native, native::MenuEntry, quit, text, toast,
+    NATIVE_BUTTON_HEIGHT, machine_form, native, native::MenuEntry, quit, text, toast,
     ENTER_DURATION, SIDEBAR_INSET, SIDEBAR_WIDTH, TOOLBAR_HEIGHT, delayed_reveal, drag_area, spinner,
 };
 
@@ -47,7 +48,8 @@ actions!(
         ShowContainers,
         ShowVolumes,
         ShowImages,
-        ShowNetworks
+        ShowNetworks,
+        NewMachine
     ]
 );
 
@@ -149,6 +151,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-4", ShowNetworks, None),
     ]);
     cx.bind_keys([KeyBinding::new("cmd-o", OpenComposeFile, None)]);
+    cx.bind_keys([KeyBinding::new("cmd-shift-n", NewMachine, None)]);
 }
 
 /// The value of a sidebar resize drag.
@@ -182,6 +185,8 @@ pub struct AppView {
     store: Entity<ContainerStore>,
     stats: Entity<StatsStore>,
     machines: Entity<MachineStore>,
+    /// The resource use of the VM of the current machine.
+    usage: Entity<UsageStore>,
     list: Entity<ContainerList>,
     volumes: Entity<VolumeStore>,
     volume_list: Entity<VolumeList>,
@@ -263,6 +268,7 @@ impl AppView {
         let store = cx.new(ContainerStore::new);
         let stats = cx.new(|_| StatsStore::new());
         let machines = cx.new(MachineStore::new);
+        let usage = cx.new(|_| UsageStore::default());
         let list = cx.new(|cx| ContainerList::new(store.clone(), stats.clone(), window, cx));
         let volumes = cx.new(|cx| VolumeStore::new(store.clone(), cx));
         let volume_list = cx.new(|cx| VolumeList::new(volumes.clone(), store.clone(), window, cx));
@@ -300,9 +306,11 @@ impl AppView {
                 // The Dock icon is dim when no machine runs.
                 super::app_icon::set_running(!sockets.is_empty(), cx);
                 this.store.update(cx, |s, cx| s.prefetch(sockets, cx));
+                this.sync_usage(cx);
                 cx.notify();
             }),
             cx.observe_global::<quit::Quitting>(|_, cx| cx.notify()),
+            cx.observe(&usage, |_, _, cx| cx.notify()),
             cx.subscribe_in(&machines, window, |this, _, ev: &MachineEvent, _, cx| match ev {
                 MachineEvent::Error(msg) => {
                     toast::show(Toast::error(msg.clone()), cx)
@@ -341,6 +349,7 @@ impl AppView {
                         // comes or goes.
                         this.machines.update(cx, |m, cx| m.refresh(cx));
                     }
+                    this.sync_usage(cx);
                     cx.notify();
                 }
             }),
@@ -458,11 +467,28 @@ impl AppView {
             }
             false
         });
+        // The shortcut and the menu item work when no element of the view
+        // has the focus, for example when the engine is off. An action
+        // handler on the view gets only the actions on the focus path.
+        let view = cx.weak_entity();
+        let handle = window.window_handle();
+        App::on_action(cx, move |_: &NewMachine, cx: &mut App| {
+            let view = view.clone();
+            // A menu action can come while GPUI updates the window. Open the
+            // form after the current update.
+            cx.defer(move |cx| {
+                let _ = handle.update(cx, |_, window, cx| {
+                    window.activate_window();
+                    let _ = view.update(cx, |this, cx| this.new_machine(false, window, cx));
+                });
+            });
+        });
         list.focus_handle(cx).focus(window, cx);
         AppView {
             store,
             stats,
             machines,
+            usage,
             list,
             volumes,
             volume_list,
@@ -1002,6 +1028,31 @@ impl AppView {
         self.store.update(cx, |s, cx| s.switch_to(socket, cx));
     }
 
+    /// Reads the resource use of the current machine while it runs. A
+    /// machine with a command in progress can stop at any time, so the
+    /// reads wait until the command ends.
+    fn sync_usage(&mut self, cx: &mut Context<Self>) {
+        let profile = self.store.read(cx).profile().map(str::to_string);
+        let machines = self.machines.read(cx);
+        let running: Vec<String> = machines
+            .machines
+            .iter()
+            .filter(|m| m.is_running() && !machines.busy.contains(&m.name))
+            .map(|m| m.name.clone())
+            .collect();
+        let watched = profile.filter(|p| running.contains(p));
+        self.usage.update(cx, |u, cx| {
+            u.retain_running(|p| running.iter().any(|r| r == p));
+            u.watch(watched, cx)
+        });
+    }
+
+    /// Opens the form for a new machine. `animate` is false for an open
+    /// from the keyboard or the menu bar.
+    fn new_machine(&mut self, animate: bool, window: &mut Window, cx: &mut Context<Self>) {
+        machine_form::open_new(self.machines.clone(), animate, window, cx);
+    }
+
     /// Shows the actions of a Colima profile. They are the `colima`
     /// commands for one profile.
     fn show_machine_menu(&mut self, name: &str, at: Option<Point<Pixels>>, window: &mut Window, cx: &mut Context<Self>) {
@@ -1044,6 +1095,16 @@ impl AppView {
                 }
             }),
         ));
+        let settings = machine.settings();
+        let settings_name = machine.name.clone();
+        entries.push(item(
+            "Settings…",
+            idle && settings.is_some(),
+            Box::new(move |this, window, cx| {
+                let Some(settings) = settings.clone() else { return };
+                machine_form::open_edit(settings_name.clone(), settings, running, this.machines.clone(), window, cx);
+            }),
+        ));
         if let Some(file) = machine.config_file() {
             entries.push(item(
                 "Open Configuration File",
@@ -1059,6 +1120,7 @@ impl AppView {
         ));
         entries.push(separator());
         entries.push(item("Delete…", idle, action(MachineAction::Delete)));
+        entries.push(item("Delete with Data…", idle, action(MachineAction::DeleteWithData)));
         let (entries, handlers): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
         native::show_context_menu_at(entries, at, window, cx, move |this, ix, window, cx| {
             if let Some(Some(handler)) = handlers.get(ix) {
@@ -1082,6 +1144,11 @@ impl AppView {
                 format!("Delete “{name}”?"),
                 "Colima stops the machine and deletes it and its settings. The container data stays. You cannot undo this.",
                 "Delete",
+            ),
+            MachineAction::DeleteWithData => (
+                format!("Delete “{name}” and its data?"),
+                "Colima stops the machine and deletes it, its settings, and all its container data: the images, the containers, and the volumes. You cannot undo this.",
+                "Delete with Data",
             ),
             _ => {
                 machines.update(cx, |m, cx| m.run(name, action, cx));
@@ -1437,6 +1504,7 @@ impl Render for AppView {
         let open_view = view.clone();
         let menu_view = view.clone();
         let hover_view = view.clone();
+        let new_view = view.clone();
         let sidebar = Sidebar::new(self.section, sidebar_width, move |section, window, cx| {
             let _ = view.update(cx, |this, cx| this.set_section(section, window, cx));
         })
@@ -1451,6 +1519,16 @@ impl Render for AppView {
                 let _ = menu_view.update(cx, |this, cx| this.show_machine_menu(name, None, window, cx));
             },
         )
+        .on_new_machine({
+            let view = new_view.clone();
+            move |window, cx| {
+                let _ = view.update(cx, |this, cx| this.new_machine(true, window, cx));
+            }
+        })
+        .usage({
+            let u = self.usage.read(cx);
+            u.profile().map(|p| (p.to_string(), u.usage))
+        })
         .cursor(
             self.sidebar_focus.is_focused(window).then_some(self.sidebar_cursor),
             self.sidebar_bounds.clone(),

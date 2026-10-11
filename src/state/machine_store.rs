@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use gpui::{Context, EventEmitter, Task};
 
-use crate::colima::{self, Machine, MachineAction};
+use crate::colima::{self, Machine, MachineAction, Settings};
 use crate::docker as engine;
 use crate::runtime::Backend;
 
@@ -62,6 +62,14 @@ impl MachineStore {
         cx.spawn(async move |this, cx| {
             let Ok(Ok(machines)) = rx.await else { return };
             let _ = this.update(cx, |this, cx| {
+                // A new profile can be missing from the list until
+                // `colima start` writes its files. Keep its row.
+                let mut machines = machines;
+                for m in &this.machines {
+                    if this.running_cli.contains(&m.name) && !machines.iter().any(|n| n.name == m.name) {
+                        machines.push(m.clone());
+                    }
+                }
                 if this.machines != machines {
                     this.machines = machines;
                     cx.notify();
@@ -84,6 +92,48 @@ impl MachineStore {
     /// Runs a `colima` command on a profile. A profile runs one command at
     /// a time. A second action while a command runs has no effect.
     pub fn run(&mut self, name: &str, action: MachineAction, cx: &mut Context<Self>) {
+        let profile = name.to_string();
+        let job = move || colima::run_action(&profile, action);
+        self.run_job(name, action == MachineAction::Start, action.leaves_engine_running(), job, cx);
+    }
+
+    /// Makes a new profile with `settings` and starts it. The sidebar shows
+    /// its row with a spinner until the command ends.
+    pub fn create(&mut self, name: &str, settings: Settings, cx: &mut Context<Self>) {
+        if self.machines.iter().any(|m| m.name == name) {
+            cx.emit(MachineEvent::Error(format!("A machine with the name “{name}” exists already")));
+            return;
+        }
+        self.machines.push(Machine { name: name.to_string(), status: "Stopped".into() });
+        let profile = name.to_string();
+        self.run_job(name, true, true, move || colima::create(&profile, &settings), cx);
+    }
+
+    /// Changes the settings of a profile. A running machine restarts.
+    pub fn configure(&mut self, name: &str, old: Settings, new: Settings, cx: &mut Context<Self>) {
+        let Some(running) = self.machines.iter().find(|m| m.name == name).map(Machine::is_running) else {
+            return;
+        };
+        if running && let Some(m) = self.machines.iter_mut().find(|m| m.name == name) {
+            // The engine stops first. The status changes back when the
+            // engine answers again.
+            m.status = "Stopped".into();
+        }
+        let profile = name.to_string();
+        self.run_job(name, true, true, move || colima::configure(&profile, &old, &new, running), cx);
+    }
+
+    /// Runs `job` for a profile. `starts` tells that the engine answers
+    /// before the job ends, as with `colima start`. `leaves_running` tells
+    /// that the engine runs when the job ends.
+    fn run_job(
+        &mut self,
+        name: &str,
+        starts: bool,
+        leaves_running: bool,
+        job: impl FnOnce() -> anyhow::Result<()> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
         if !self.running_cli.insert(name.to_string()) {
             return;
         }
@@ -92,10 +142,9 @@ impl MachineStore {
         let done = Arc::new(AtomicBool::new(false));
         let backend = Backend::global(cx);
         let rx = backend.spawn({
-            let profile = profile.clone();
             let done = done.clone();
             async move {
-                let result = tokio::task::spawn_blocking(move || colima::run_action(&profile, action))
+                let result = tokio::task::spawn_blocking(job)
                     .await
                     .map_err(anyhow::Error::from)
                     .and_then(|r| r);
@@ -106,7 +155,7 @@ impl MachineStore {
         // A start can take minutes, but the engine can answer before the
         // command ends. For the other actions, the engine can answer before
         // the command stops it, so only the end of the command counts.
-        if action == MachineAction::Start {
+        if starts {
             let ready = backend.spawn(engine::wait_until_ready(engine::profile_socket(&profile), done));
             let profile = profile.clone();
             cx.spawn(async move |this, cx| {
@@ -134,7 +183,7 @@ impl MachineStore {
                 this.running_cli.remove(&profile);
                 match result {
                     Err(e) => cx.emit(MachineEvent::Error(e.to_string())),
-                    Ok(()) if action.leaves_engine_running() => cx.emit(MachineEvent::Ready(profile.clone())),
+                    Ok(()) if leaves_running => cx.emit(MachineEvent::Ready(profile.clone())),
                     Ok(()) => {}
                 }
                 this.refresh(cx);

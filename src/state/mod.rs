@@ -4,4 +4,5 @@ pub mod log_buffer;
 pub mod machine_store;
 pub mod network_store;
 pub mod stats_store;
+pub mod usage_store;
 pub mod volume_store;
