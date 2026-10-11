@@ -137,8 +137,8 @@ fn cache_dir() -> Option<PathBuf> {
 }
 
 /// Saves the icons of all appearances and states. A stamp file names the
-/// colors and the app version of the saved icons, so the app writes them
-/// again only after a change.
+/// colors, the app version, and a hash of the SVG of the saved icons, so
+/// the app writes them again only after a change.
 fn save(accents: [Hsla; 2]) {
     if let Some(dir) = cache_dir() {
         save_to(&dir, accents);
@@ -147,7 +147,13 @@ fn save(accents: [Hsla; 2]) {
 
 fn save_to(dir: &std::path::Path, accents: [Hsla; 2]) {
     let [light, dark] = accents.map(rgb);
-    let stamp = format!("{} {light:06X} {dark:06X}\n", env!("CARGO_PKG_VERSION"));
+    let design = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        TEMPLATE.hash(&mut hasher);
+        hasher.finish()
+    };
+    let stamp = format!("{} {design:016X} {light:06X} {dark:06X}\n", env!("CARGO_PKG_VERSION"));
     let stamp_file = dir.join("stamp");
     if std::fs::read_to_string(&stamp_file).is_ok_and(|s| s == stamp) {
         return;

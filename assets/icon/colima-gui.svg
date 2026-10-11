@@ -3,10 +3,14 @@
        with a hot container on top. This file is a template. The app fills
        the color tokens (names in double braces) from the accent color and
        the appearance (see src/ui/app_icon.rs). scripts/icon.sh fills them
-       with the default colors for the bundle icon. -->
+       with the default colors for the bundle icon.
+
+       The stack has the shapes of the menu bar icon (menu-bar.svg), in its
+       36-unit coordinates. The "edges" mask is the same as in that file, so
+       both icons have the same gaps between the containers. -->
   <defs>
     <style>
-      polygon { stroke-width: 14; stroke-linejoin: round; }
+      .face { stroke-width: 0.3; stroke-linejoin: round; }
       .glass-top { fill: {{glass_top}}; stroke: {{glass_top}}; }
       .glass-left { fill: {{glass_left}}; stroke: {{glass_left}}; }
       .glass-right { fill: {{glass_right}}; stroke: {{glass_right}}; }
@@ -27,6 +31,18 @@
       <stop offset="0" stop-color="#fff" stop-opacity="0.22"/>
       <stop offset="0.5" stop-color="#fff" stop-opacity="0"/>
     </linearGradient>
+    <mask id="edges" maskUnits="userSpaceOnUse" x="0" y="0" width="36" height="36">
+      <g stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round">
+        <polygon points="26.1,10.7 34.3,15.4 34.3,24.8 26.1,29.5 18,24.8 18,15.4" fill="#fff" stroke="#000"/>
+        <path d="M34.3,15.4 L26.1,20.1 L18,15.4 M26.1,20.1 L26.1,29.5" fill="none" stroke="#000"/>
+        <polygon points="9.9,10.7 18,15.4 18,24.8 9.9,29.5 1.7,24.8 1.7,15.4" fill="#fff" stroke="#000"/>
+        <path d="M18,15.4 L9.9,20.1 L1.7,15.4 M9.9,20.1 L9.9,29.5" fill="none" stroke="#000"/>
+        <polygon points="18,15.4 26.1,20.1 26.1,29.5 18,34.2 9.9,29.5 9.9,20.1" fill="#fff" stroke="#000"/>
+        <path d="M26.1,20.1 L18,24.8 L9.9,20.1 M18,24.8 L18,34.2" fill="none" stroke="#000"/>
+        <polygon points="18,1.3 26.1,6 26.1,15.4 18,20.1 9.9,15.4 9.9,6" fill="#fff" stroke="#000"/>
+        <path d="M26.1,6 L18,10.7 L9.9,6 M18,10.7 L18,20.1" fill="none" stroke="#000"/>
+      </g>
+    </mask>
     <clipPath id="tile">
       <rect x="100" y="100" width="824" height="824" rx="185"/>
     </clipPath>
@@ -43,18 +59,20 @@
       <rect x="100" y="100" width="824" height="824" fill="url(#bg)"/>
       <circle cx="512" cy="430" r="340" fill="url(#glow)"/>
       <g filter="url(#lift)">
-        <polygon class="glass-left" points="526.5,493.8 633.2,555.4 633.2,678.6 526.5,617.0"/>
-        <polygon class="glass-right" points="739.9,493.8 633.2,555.4 633.2,678.6 739.9,617.0"/>
-        <polygon class="glass-top" points="633.2,432.2 739.9,493.8 633.2,555.4 526.5,493.8"/>
-        <polygon class="glass-left" points="284.1,493.8 390.8,555.4 390.8,678.6 284.1,617.0"/>
-        <polygon class="glass-right" points="497.5,493.8 390.8,555.4 390.8,678.6 497.5,617.0"/>
-        <polygon class="glass-top" points="390.8,432.2 497.5,493.8 390.8,555.4 284.1,493.8"/>
-        <polygon class="glass-left" points="405.3,563.8 512.0,625.4 512.0,748.6 405.3,687.0"/>
-        <polygon class="glass-right" points="618.7,563.8 512.0,625.4 512.0,748.6 618.7,687.0"/>
-        <polygon class="glass-top" points="512.0,502.2 618.7,563.8 512.0,625.4 405.3,563.8"/>
-        <polygon class="hot-left" points="405.3,353.8 512.0,415.4 512.0,538.6 405.3,477.0"/>
-        <polygon class="hot-right" points="618.7,353.8 512.0,415.4 512.0,538.6 618.7,477.0"/>
-        <polygon class="hot-top" points="512.0,292.2 618.7,353.8 512.0,415.4 405.3,353.8"/>
+        <g transform="translate(269 275) scale(13.5)" mask="url(#edges)">
+          <polygon class="face glass-left" points="18,15.4 26.1,20.1 26.1,29.5 18,24.8"/>
+          <polygon class="face glass-right" points="26.1,20.1 34.3,15.4 34.3,24.8 26.1,29.5"/>
+          <polygon class="face glass-top" points="26.1,10.7 34.3,15.4 26.1,20.1 18,15.4"/>
+          <polygon class="face glass-left" points="1.7,15.4 9.9,20.1 9.9,29.5 1.7,24.8"/>
+          <polygon class="face glass-right" points="9.9,20.1 18,15.4 18,24.8 9.9,29.5"/>
+          <polygon class="face glass-top" points="9.9,10.7 18,15.4 9.9,20.1 1.7,15.4"/>
+          <polygon class="face glass-left" points="9.9,20.1 18,24.8 18,34.2 9.9,29.5"/>
+          <polygon class="face glass-right" points="18,24.8 26.1,20.1 26.1,29.5 18,34.2"/>
+          <polygon class="face glass-top" points="18,15.4 26.1,20.1 18,24.8 9.9,20.1"/>
+          <polygon class="face hot-left" points="9.9,6 18,10.7 18,20.1 9.9,15.4"/>
+          <polygon class="face hot-right" points="18,10.7 26.1,6 26.1,15.4 18,20.1"/>
+          <polygon class="face hot-top" points="18,1.3 26.1,6 18,10.7 9.9,6"/>
+        </g>
       </g>
       <rect x="100" y="100" width="824" height="824" fill="url(#sheen)"/>
     </g>
