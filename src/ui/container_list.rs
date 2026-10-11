@@ -674,8 +674,14 @@ impl ContainerList {
                     .w(px(ACTIONS_WIDTH))
                     .justify_end()
                     .when(!cursor, |d| d.invisible().group_hover(HEADER_GROUP, |s| s.visible()))
-                    .child(group_button(IconName::Play, "g-start", "Start all", Action::Start))
-                    .child(group_button(IconName::Square, "g-stop", "Stop all", Action::Stop))
+                    // Start shows when a member is stopped, and Stop shows
+                    // when a member runs, as in the group menu.
+                    .when(running < total, |d| {
+                        d.child(group_button(IconName::Play, "g-start", "Start all", Action::Start))
+                    })
+                    .when(running > 0, |d| {
+                        d.child(group_button(IconName::Square, "g-stop", "Stop all", Action::Stop))
+                    })
                     .child(group_button(
                         IconName::RotateCcw,
                         "g-restart",
