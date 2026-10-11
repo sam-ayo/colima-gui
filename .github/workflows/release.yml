@@ -142,17 +142,21 @@ jobs:
           security delete-keychain "$RUNNER_TEMP/signing.keychain-db" || true
           rm -f "$RUNNER_TEMP/notary-key.p8"
 
-      # The packages go only to the publish job, and the release keeps
-      # them. A short retention keeps the artifact storage quota free.
-      - uses: actions/upload-artifact@v4
+      # The cache gives the packages to the publish job. Artifacts have a
+      # small storage quota, and a full quota stopped the v0.2.4 release.
+      # The cache removes the entries that no run uses.
+      - name: Collect the packages
+        if: env.PACKAGE == 'true'
+        run: |
+          mkdir handoff
+          cp target/package/${{ matrix.arch }}/*.pkg target/package/${{ matrix.arch }}/*.zip handoff/
+
+      - uses: actions/cache/save@v4
         if: env.PACKAGE == 'true'
         with:
-          retention-days: 1
-          name: package-${{ matrix.arch }}
-          path: |
-            target/package/${{ matrix.arch }}/*.pkg
-            target/package/${{ matrix.arch }}/*.zip
-          if-no-files-found: error
+          path: handoff
+          key: package-${{ github.run_id }}-${{ matrix.arch }}
+          enableCrossOsArchive: true
 
   publish:
     needs: build
@@ -172,11 +176,23 @@ jobs:
           git fetch --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
           git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > "$RUNNER_TEMP/notes.txt"
 
-      - uses: actions/download-artifact@v5
+      # Each entry adds its files to the folder.
+      - uses: actions/cache/restore@v4
         with:
-          pattern: package-*
-          path: release-files
-          merge-multiple: true
+          path: handoff
+          key: package-${{ github.run_id }}-arm64
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+
+      - uses: actions/cache/restore@v4
+        with:
+          path: handoff
+          key: package-${{ github.run_id }}-x86_64
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+
+      - name: Move the packages
+        run: mv handoff release-files
 
       - name: Sign
         if: github.ref_type == 'tag'
