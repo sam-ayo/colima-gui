@@ -378,7 +378,7 @@ pub fn init_menus(cx: &mut App) {
     cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
     cx.on_action(|_: &Quit, cx| cx.quit());
     cx.on_action(|_: &ColimaHelp, cx| cx.open_url("https://github.com/abiosoft/colima#readme"));
-    cx.on_action(|_: &CloseWindow, cx| with_active_window(cx, |w, _| w.remove_window()));
+    cx.on_action(|_: &CloseWindow, cx| with_active_window(cx, |w, _| hide_window(w)));
     cx.on_action(|_: &Minimize, cx| with_active_window(cx, |w, _| w.minimize_window()));
     cx.on_action(|_: &Zoom, cx| with_active_window(cx, |w, _| w.zoom_window()));
     cx.on_action(|a: &SetAccentColor, cx| {
@@ -440,7 +440,7 @@ fn set_menus(cx: &mut App) {
     };
     use crate::ui::key_nav::{NextTab, PrevTab};
     use crate::ui::container_list::{
-        FocusSearch, RemoveSelected, RestartSelected, StartSelected, StopSelected, ToggleRunningOnly,
+        FocusSearch, OpenComposeFile, RemoveSelected, RestartSelected, StartSelected, StopSelected, ToggleRunningOnly,
     };
 
     let current = cx.try_global::<AccentColor>().copied().unwrap_or_default();
@@ -471,7 +471,11 @@ fn set_menus(cx: &mut App) {
             MenuItem::action(format!("Quit {APP_NAME}"), Quit),
             MenuItem::action("Quit Completely", QuitCompletely),
         ]),
-        Menu::new("File").items([MenuItem::action("Close Window", CloseWindow)]),
+        Menu::new("File").items([
+            MenuItem::action("Open Compose File…", OpenComposeFile),
+            MenuItem::separator(),
+            MenuItem::action("Close Window", CloseWindow),
+        ]),
         Menu::new("Edit").items([
             MenuItem::os_action("Undo", input::Undo, OsAction::Undo),
             MenuItem::os_action("Redo", input::Redo, OsAction::Redo),
@@ -523,6 +527,13 @@ pub fn saved_string(key: &str) -> Option<String> {
 
 pub fn save_string(key: &str, value: &str) {
     platform::save_string(key, value)
+}
+
+/// Hides the window, but does not close it. The app and Colima continue
+/// to run. A click on the Dock icon or "Open" in the status bar menu shows
+/// the window again.
+pub fn hide_window(window: &Window) {
+    platform::hide_window(window)
 }
 
 /// Sets the Dock icon from the data of an image file, such as a PNG.
@@ -892,6 +903,21 @@ mod platform {
             .detach();
     }
 
+    pub(super) fn hide_window(window: &Window) {
+        let Ok(handle) = HasWindowHandle::window_handle(window) else {
+            return;
+        };
+        let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+            return;
+        };
+        // SAFETY: the handle points to the GPUI view, which lives as long as
+        // the window.
+        let view: &NSView = unsafe { handle.ns_view.cast().as_ref() };
+        if let Some(ns_window) = view.window() {
+            ns_window.orderOut(None);
+        }
+    }
+
     /// Sets the Dock icon from the data of an image file, such as a PNG.
     pub(super) fn set_app_icon(image: &[u8]) {
         let Some(mtm) = MainThreadMarker::new() else {
@@ -1158,6 +1184,9 @@ mod platform {
     }
     pub(super) fn autosave_frame(_: &Window, _: &'static str, _: &App) {}
     pub(super) fn set_app_icon(_: &[u8]) {}
+    pub(super) fn hide_window(window: &Window) {
+        window.minimize_window();
+    }
     pub(super) fn show_about_panel(_: &str, _: &str) {}
     pub(super) fn pop_up_menu(_: &[MenuEntry], _: Option<(f64, f64)>) -> Option<usize> {
         None

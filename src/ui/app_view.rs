@@ -13,14 +13,14 @@ use gpui_kit_assets::IconName;
 
 use crate::colima::{self, MachineAction};
 use crate::docker::EngineStatus;
-use crate::state::container_store::{ContainerStore, StoreEvent};
+use crate::state::container_store::{ComposeEvent, ContainerStore, StoreEvent};
 use crate::state::image_store::{ImageEvent, ImageStore};
 use crate::state::machine_store::{MachineEvent, MachineStore};
 use crate::state::network_store::{NetworkEvent, NetworkStore};
 use crate::state::stats_store::StatsStore;
 use crate::state::volume_store::{VolumeEvent, VolumeStore};
 use crate::ui::container_detail::{ContainerDetail, DetailEvent};
-use crate::ui::container_list::{ContainerList, ListEvent};
+use crate::ui::container_list::{ContainerList, ListEvent, OpenComposeFile};
 use crate::ui::image_detail::{ImageDetail, ImageDetailEvent};
 use crate::ui::image_list::{ImageList, ImageListEvent};
 use crate::ui::key_nav::{self, Move};
@@ -105,6 +105,30 @@ const SIDEBAR_SPRING_EPSILON: f32 = 0.5;
 /// from 0 to 1. This value is about half a pixel of a pane.
 const DETAIL_SPRING_EPSILON: f32 = 0.001;
 
+/// One toast for each Compose action. The progress lines replace its
+/// description, and the result replaces the toast.
+fn show_compose_toast(ev: &ComposeEvent, cx: &mut App) {
+    let toast = match ev {
+        ComposeEvent::Progress { key, name, action, line } => {
+            let verb = action.pending_label().trim_end_matches('…');
+            let toast = Toast::loading(format!("{verb} “{name}”…")).id(format!("compose:{key}"));
+            match line {
+                Some(line) => toast.description(line.clone()),
+                None => toast,
+            }
+        }
+        ComposeEvent::Done { key, name, action, error: None } => {
+            Toast::success(format!("{} “{name}”", action.done_label())).id(format!("compose:{key}"))
+        }
+        ComposeEvent::Done { key, name, action, error: Some(e) } => {
+            Toast::error(format!("Could not {} “{name}”", action.verb()))
+                .description(e.clone())
+                .id(format!("compose:{key}"))
+        }
+    };
+    toast::show(toast, cx);
+}
+
 pub fn bind_keys(cx: &mut App) {
     // The standard macOS shortcut for "Show Sidebar" and "Hide Sidebar".
     cx.bind_keys([KeyBinding::new("cmd-ctrl-s", ToggleSidebar, None)]);
@@ -124,6 +148,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-3", ShowImages, None),
         KeyBinding::new("cmd-4", ShowNetworks, None),
     ]);
+    cx.bind_keys([KeyBinding::new("cmd-o", OpenComposeFile, None)]);
 }
 
 /// The value of a sidebar resize drag.
@@ -292,6 +317,7 @@ impl AppView {
                 StoreEvent::Error(msg) => {
                     toast::show(Toast::error(msg.clone()), cx)
                 }
+                StoreEvent::Compose(ev) => show_compose_toast(ev, cx),
                 StoreEvent::VolumesChanged | StoreEvent::ImagesChanged | StoreEvent::NetworksChanged => {}
                 StoreEvent::Changed => {
                     let status = this.store.read(cx).status.clone();
@@ -423,9 +449,15 @@ impl AppView {
                 ListEvent::Selected { id: None, pointer } => this.close_pane(Section::Containers, *pointer, cx),
             }),
         ];
-        // The app quits when the window closes. While Colima stops, a close
-        // would quit before the stop ends.
-        window.on_window_should_close(cx, |_, cx| !quit::is_quitting(cx));
+        // The close button hides the window. The app, its status bar item,
+        // and Colima continue to run. While Colima stops before a quit, the
+        // window stays, because it shows the progress.
+        window.on_window_should_close(cx, |window, cx| {
+            if !quit::is_quitting(cx) {
+                native::hide_window(window);
+            }
+            false
+        });
         list.focus_handle(cx).focus(window, cx);
         AppView {
             store,
@@ -621,6 +653,26 @@ impl AppView {
     }
 
     /// Shows a section, and moves the focus to its list.
+    /// Asks for a Compose file, and creates and starts its services. The
+    /// list shows the containers when Compose creates them.
+    fn open_compose_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Compose Up".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = paths.await else { return };
+            let Some(path) = paths.into_iter().next() else { return };
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.set_section(Section::Containers, window, cx);
+                this.store.update(cx, |s, cx| s.compose_up_file(&path, cx));
+            });
+        })
+        .detach();
+    }
+
     fn set_section(&mut self, section: Section, window: &mut Window, cx: &mut Context<Self>) {
         // The sections are disabled when no machine runs.
         if self.machines.read(cx).all_off() {
@@ -1590,6 +1642,7 @@ impl Render for AppView {
             .on_action(cx.listener(|this, _: &ShowVolumes, w, cx| this.set_section(Section::Volumes, w, cx)))
             .on_action(cx.listener(|this, _: &ShowImages, w, cx| this.set_section(Section::Images, w, cx)))
             .on_action(cx.listener(|this, _: &ShowNetworks, w, cx| this.set_section(Section::Networks, w, cx)))
+            .on_action(cx.listener(|this, _: &OpenComposeFile, w, cx| this.open_compose_file(w, cx)))
             .on_action(cx.listener(|_, _: &native::CloseWindow, _, cx| {
                 if !quit::is_quitting(cx) {
                     cx.propagate();

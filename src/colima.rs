@@ -15,14 +15,19 @@ struct Status {
 /// `colima` and the tools it calls (`limactl`, `docker`) are found. The
 /// tools in the app bundle come last, so an installed Colima has priority.
 fn colima() -> Command {
+    let mut cmd = Command::new("colima");
+    cmd.env("PATH", search_path());
+    cmd
+}
+
+/// The PATH for the CLI tools that the app runs. See `colima`.
+pub fn search_path() -> String {
     let path = std::env::var("PATH").unwrap_or_default();
     let mut path = format!("{path}:/opt/homebrew/bin:/usr/local/bin");
     if let Some(tools) = bundled_tools() {
         path = format!("{path}:{}", tools.display());
     }
-    let mut cmd = Command::new("colima");
-    cmd.env("PATH", path);
-    cmd
+    path
 }
 
 /// The `bin` folder of the tools in the app bundle

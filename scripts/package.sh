@@ -1,9 +1,9 @@
 #!/bin/bash
 # Builds "Colima GUI.app" and an installer package (.pkg) for macOS.
 #
-# The app contains the Colima, Lima, and Docker command line tools. The
-# installer puts the app in /Applications. It then links the tools into
-# /usr/local/bin, but only for tools that are not already installed.
+# The app contains the Colima, Lima, Docker, and Docker Compose command line
+# tools. The installer puts the app in /Applications. It then links the tools
+# into /usr/local/bin, but only for tools that are not already installed.
 #
 # Usage: scripts/package.sh [arm64 | x86_64]
 # The default architecture is the architecture of this Mac. For the other
@@ -29,6 +29,7 @@ set -euo pipefail
 COLIMA_VERSION=0.10.3
 LIMA_VERSION=2.2.0
 DOCKER_VERSION=29.8.1
+COMPOSE_VERSION=5.5.1
 
 APP_NAME="Colima GUI"
 BUNDLE_ID=colima-gui
@@ -92,6 +93,12 @@ verify "$cache/$lima_file" "$cache/lima-$LIMA_VERSION-SHA256SUMS" "$lima_file"
 docker_file="docker-$DOCKER_VERSION.tgz"
 fetch "https://download.docker.com/mac/static/stable/$docker_arch/$docker_file" "docker-$docker_arch-$DOCKER_VERSION.tgz"
 
+compose_file="docker-compose-darwin-$docker_arch"
+compose_url="https://github.com/docker/compose/releases/download/v$COMPOSE_VERSION"
+fetch "$compose_url/$compose_file" "$compose_file-$COMPOSE_VERSION"
+fetch "$compose_url/checksums.txt" "compose-$COMPOSE_VERSION-checksums.txt"
+verify "$cache/$compose_file-$COMPOSE_VERSION" "$cache/compose-$COMPOSE_VERSION-checksums.txt" "$compose_file"
+
 app="$out/$APP_NAME.app"
 tools="$app/Contents/Resources/tools"
 mkdir -p "$app/Contents/MacOS" "$tools/bin"
@@ -137,6 +144,9 @@ tar xzf "$cache/$lima_file" -C "$tools" --exclude './share/lima/lima-guestagent.
 install -m 755 "$cache/$colima_file-$COLIMA_VERSION" "$tools/bin/colima"
 tar xzf "$cache/docker-$docker_arch-$DOCKER_VERSION.tgz" -C "$cache" docker/docker
 install -m 755 "$cache/docker/docker" "$tools/bin/docker"
+# The standalone name. The app runs `docker-compose` when the `docker
+# compose` plugin is not installed (see src/docker/compose.rs).
+install -m 755 "$cache/$compose_file-$COMPOSE_VERSION" "$tools/bin/docker-compose"
 
 cat > "$app/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -223,7 +233,7 @@ if [ "$(defaults read "$old/Contents/Info" CFBundleIdentifier 2>/dev/null)" = co
     rm -rf "$old"
 fi
 mkdir -p /usr/local/bin
-for tool in colima limactl lima docker; do
+for tool in colima limactl lima docker docker-compose; do
     link="/usr/local/bin/$tool"
     target="$(readlink "$link" 2>/dev/null || true)"
     if [ -L "$link" ] && { [[ "$target" == "$tools/"* ]] || [[ "$target" == "$old_tools/"* ]]; }; then

@@ -1,6 +1,7 @@
 //! Docker Engine API access through the Unix socket (bollard).
 
 pub mod ansi;
+pub mod compose;
 pub mod containers;
 pub mod events;
 pub mod image_logo;

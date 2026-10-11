@@ -1,6 +1,7 @@
 //! The list of containers and the engine status.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -10,6 +11,7 @@ use futures::channel::oneshot;
 use gpui::{Context, EventEmitter, Global, Task};
 use indexmap::IndexMap;
 
+use crate::docker::compose::{self, ComposeAction};
 use crate::docker::containers::{self, Action};
 use crate::docker::events::{self, EngineEvent};
 use crate::docker::{self as engine, ContainerRow, EngineStatus};
@@ -248,6 +250,16 @@ pub enum StoreEvent {
     /// stream connected again.
     NetworksChanged,
     Error(String),
+    Compose(ComposeEvent),
+}
+
+/// The state of a Compose action. `key` is the same for all the events of
+/// one action.
+#[derive(Clone, Debug)]
+pub enum ComposeEvent {
+    /// The action started (`line` is `None`), or Compose wrote a line.
+    Progress { key: String, name: String, action: ComposeAction, line: Option<String> },
+    Done { key: String, name: String, action: ComposeAction, error: Option<String> },
 }
 
 pub struct ContainerStore {
@@ -275,6 +287,8 @@ pub struct ContainerStore {
     prefetching: HashSet<String>,
     /// True while the rows are saved rows, before the connection is ready.
     stale: bool,
+    /// The Compose actions that run now, by project name or file path.
+    pub compose_pending: HashMap<String, ComposeAction>,
 }
 
 impl EventEmitter<StoreEvent> for ContainerStore {}
@@ -295,6 +309,7 @@ impl ContainerStore {
             saved: HashMap::new(),
             prefetching: HashSet::new(),
             stale: false,
+            compose_pending: HashMap::new(),
         };
         this.connect(cx);
         this
@@ -639,6 +654,80 @@ impl ContainerStore {
         }
     }
 
+    /// Runs a Compose action on a project of the list.
+    pub fn run_compose(&mut self, project: &str, action: ComposeAction, cx: &mut Context<Self>) {
+        let target = Target::Project(project.to_string());
+        self.spawn_compose(project.to_string(), project.to_string(), target, action, cx);
+    }
+
+    /// Creates and starts the services of a Compose file. The project gets
+    /// its name from the folder of the file, as with `docker compose up`.
+    pub fn compose_up_file(&mut self, path: &Path, cx: &mut Context<Self>) {
+        let name = path
+            .parent()
+            .and_then(Path::file_name)
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
+        let key = path.display().to_string();
+        let target = Target::File(compose::Project::from_file(path));
+        self.spawn_compose(key, name, target, ComposeAction::Up, cx);
+    }
+
+    fn spawn_compose(&mut self, key: String, name: String, target: Target, action: ComposeAction, cx: &mut Context<Self>) {
+        let (Some(docker), Some(socket)) = (self.docker.clone(), self.socket.clone()) else {
+            cx.emit(StoreEvent::Error(format!("Could not {} “{name}”: the engine is not running", action.verb())));
+            return;
+        };
+        if self.compose_pending.contains_key(&key) {
+            return;
+        }
+        self.compose_pending.insert(key.clone(), action);
+        cx.emit(StoreEvent::Compose(ComposeEvent::Progress {
+            key: key.clone(),
+            name: name.clone(),
+            action,
+            line: None,
+        }));
+        self.changed(cx);
+        let (tx, lines) = async_channel::unbounded::<String>();
+        let rx = Backend::global(cx).spawn(async move {
+            let project = match target {
+                Target::File(project) => project,
+                // A down needs only the name.
+                Target::Project(name) if !action.needs_files() => {
+                    compose::Project { name: Some(name), ..Default::default() }
+                }
+                Target::Project(name) => compose::project(&docker, &name).await?,
+            };
+            tokio::task::spawn_blocking(move || {
+                compose::run(&socket, &project, action, |line| {
+                    let _ = tx.send_blocking(line.to_string());
+                })
+            })
+            .await
+            .map_err(anyhow::Error::from)
+            .and_then(|r| r)
+        });
+        cx.spawn(async move |this, cx| {
+            // The channel closes when the command ends.
+            while let Some(batch) = recv_batch(&lines, 256).await {
+                let Some(line) = batch.into_iter().last() else { continue };
+                let event = ComposeEvent::Progress { key: key.clone(), name: name.clone(), action, line: Some(line) };
+                if this.update(cx, |_, cx| cx.emit(StoreEvent::Compose(event))).is_err() {
+                    return;
+                }
+            }
+            let result = rx.await.unwrap_or_else(|_| Err(anyhow::anyhow!("cancelled")));
+            let _ = this.update(cx, |this, cx| {
+                this.compose_pending.remove(&key);
+                let error = result.err().map(|e| clean_error(&e));
+                cx.emit(StoreEvent::Compose(ComposeEvent::Done { key, name, action, error }));
+                this.changed(cx);
+            });
+        })
+        .detach();
+    }
+
     /// Starts the Colima profile of the engine, or the default profile if
     /// the socket is not in a profile.
     pub fn start_colima(&mut self, cx: &mut Context<Self>) {
@@ -698,6 +787,13 @@ impl ContainerStore {
         })
         .detach();
     }
+}
+
+/// The project of a Compose action.
+enum Target {
+    /// A project in the list. Its containers tell its files.
+    Project(String),
+    File(compose::Project),
 }
 
 /// Docker errors contain the HTTP status. Keep only the message.

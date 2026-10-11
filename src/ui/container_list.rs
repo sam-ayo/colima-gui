@@ -13,6 +13,7 @@ use gpui_component::{ActiveTheme, Icon, Selectable as _, Sizable as _, h_flex, v
 use gpui_kit_assets::IconName;
 
 use crate::docker::EngineStatus;
+use crate::docker::compose::ComposeAction;
 use crate::docker::containers::Action;
 use crate::state::container_store::{ContainerStore, ListItem, StoreEvent, build_list};
 use crate::state::stats_store::{StatsStore, select_wanted};
@@ -31,7 +32,8 @@ actions!(
         RemoveSelected,
         FocusSearch,
         ClearSelection,
-        ToggleRunningOnly
+        ToggleRunningOnly,
+        OpenComposeFile
     ]
 );
 
@@ -412,6 +414,25 @@ impl ContainerList {
         .detach();
     }
 
+    /// Runs `docker compose down` after the user confirms, because the
+    /// containers cannot come back without the Compose files.
+    fn request_compose_down(&mut self, project: String, window: &mut Window, cx: &mut Context<Self>) {
+        let store = self.store.clone();
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &format!("Run Compose Down for “{project}”?"),
+            Some("Compose stops and removes the containers and networks of this project. The volumes and the images stay."),
+            &[PromptButton::Cancel("Cancel".into()), PromptButton::new("Compose Down")],
+            cx,
+        );
+        cx.spawn(async move |_, cx| {
+            if answer.await == Ok(1) {
+                store.update(cx, |s, cx| s.run_compose(&project, ComposeAction::Down, cx));
+            }
+        })
+        .detach();
+    }
+
     fn render_item(&self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let item = match &self.items[ix] {
             ListItem::Group {
@@ -522,8 +543,13 @@ impl ContainerList {
             format!("{total} {}", if total == 1 { "container" } else { "containers" }),
             None,
         )];
+        // A Compose action that runs replaces the state counts, because
+        // the counts change during the action.
+        let compose = self.store.read(cx).compose_pending.get(project).copied();
+        if let Some(action) = compose {
+            summary.push((action.pending_label().into(), None));
         // When all members run, the count is sufficient.
-        if running < total {
+        } else if running < total {
             if failed > 0 {
                 summary.push((format!("{failed} failed"), Some(t.red)));
             }
@@ -675,32 +701,55 @@ impl ContainerList {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let rows = &self.store.read(cx).set.rows;
+        let store = self.store.read(cx);
+        let rows = &store.set.rows;
         let members = || rows.values().filter(|r| r.compose_project.as_deref() == Some(project));
         let any_running = members().any(|r| r.state.is_running());
         let any_stopped = members().any(|r| !r.state.is_running());
         let compose_file = members().find_map(|r| r.compose_file.clone());
+        // One Compose action at a time for each project. The actions that
+        // read the files need a file.
+        let idle = !store.compose_pending.contains_key(project);
+        let has_file = compose_file.is_some();
+        enum Choice {
+            Container(Action),
+            Compose(ComposeAction),
+            RevealFile,
+        }
+        let compose = |action: ComposeAction, enabled: bool| {
+            (MenuEntry::Item { label: action.label().into(), enabled }, Some(Choice::Compose(action)))
+        };
         let mut entries = vec![
-            (MenuEntry::Item { label: "Start All".into(), enabled: any_stopped }, Some(Action::Start)),
-            (MenuEntry::Item { label: "Stop All".into(), enabled: any_running }, Some(Action::Stop)),
-            (MenuEntry::item("Restart All"), Some(Action::Restart)),
+            (MenuEntry::Item { label: "Start All".into(), enabled: any_stopped }, Some(Choice::Container(Action::Start))),
+            (MenuEntry::Item { label: "Stop All".into(), enabled: any_running }, Some(Choice::Container(Action::Stop))),
+            (MenuEntry::item("Restart All"), Some(Choice::Container(Action::Restart))),
+            (MenuEntry::Separator, None),
+            compose(ComposeAction::Up, idle && has_file),
+            compose(ComposeAction::PullUp, idle && has_file),
+            compose(ComposeAction::BuildUp, idle && has_file),
+            compose(ComposeAction::Down, idle),
         ];
-        if compose_file.is_some() {
+        if has_file {
             entries.push((MenuEntry::Separator, None));
-            entries.push((MenuEntry::item("Show Compose File in Finder"), None));
+            entries.push((MenuEntry::item("Show Compose File in Finder"), Some(Choice::RevealFile)));
         }
         entries.push((MenuEntry::Separator, None));
-        entries.push((MenuEntry::item("Remove All…"), Some(Action::Remove)));
-        let (entries, actions): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
+        entries.push((MenuEntry::item("Remove All…"), Some(Choice::Container(Action::Remove))));
+        let (entries, choices): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
         let project = project.to_string();
-        native::show_context_menu_at(entries, at, window, cx, move |this, ix, window, cx| match actions[ix] {
-            Some(Action::Remove) => this.request_group_remove(project.clone(), window, cx),
-            Some(action) => this.store.update(cx, |s, cx| s.run_group_action(&project, action, cx)),
-            None => {
+        native::show_context_menu_at(entries, at, window, cx, move |this, ix, window, cx| match &choices[ix] {
+            Some(Choice::Container(Action::Remove)) => this.request_group_remove(project.clone(), window, cx),
+            Some(Choice::Container(action)) => {
+                this.store.update(cx, |s, cx| s.run_group_action(&project, *action, cx))
+            }
+            Some(Choice::Compose(ComposeAction::Down)) => this.request_compose_down(project.clone(), window, cx),
+            Some(Choice::Compose(action)) => this.store.update(cx, |s, cx| s.run_compose(&project, *action, cx)),
+            Some(Choice::RevealFile) => {
                 if let Some(path) = &compose_file {
                     cx.reveal_path(std::path::Path::new(path));
                 }
             }
+            None => {}
         });
     }
 
