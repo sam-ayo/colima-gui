@@ -142,9 +142,12 @@ jobs:
           security delete-keychain "$RUNNER_TEMP/signing.keychain-db" || true
           rm -f "$RUNNER_TEMP/notary-key.p8"
 
+      # The packages go only to the publish job, and the release keeps
+      # them. A short retention keeps the artifact storage quota free.
       - uses: actions/upload-artifact@v4
         if: env.PACKAGE == 'true'
         with:
+          retention-days: 1
           name: package-${{ matrix.arch }}
           path: |
             target/package/${{ matrix.arch }}/*.pkg
