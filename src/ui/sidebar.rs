@@ -3,7 +3,6 @@
 
 use std::collections::HashSet;
 use std::rc::Rc;
-use std::time::Duration;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
@@ -12,10 +11,9 @@ use gpui_component::{ActiveTheme, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit_assets::IconName;
 
 use super::key_nav::{self, BoundsCell};
-use super::{SIDEBAR_INSET, SIDEBAR_RADIUS, TOOLBAR_HEIGHT, drag_area, native, settings, spinner, tabular_nums, text};
+use super::{SIDEBAR_INSET, SIDEBAR_RADIUS, TOOLBAR_HEIGHT, drag_area, native, settings, spinner, text};
 use crate::colima::Machine;
-use crate::docker::stats::format_bytes;
-use crate::state::usage_store::Usage;
+use crate::state::usage_store::UsageStore;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Section {
@@ -78,9 +76,9 @@ pub struct Sidebar {
     on_open: MachineHandler,
     on_menu: MachineHandler,
     on_new_machine: ClickHandler,
-    /// The resource use of the VM of the current machine, if it runs. The
-    /// use is `None` until the first read ends.
-    usage: Option<(String, Option<Usage>)>,
+    /// The resource use of the VM of the current machine, for the settings
+    /// popover.
+    usage: Option<Entity<UsageStore>>,
 }
 
 impl Sidebar {
@@ -130,10 +128,9 @@ impl Sidebar {
         self
     }
 
-    /// Shows the gauges of the resource use of the machine `name`. A `None`
-    /// use shows placeholders until the first read ends.
-    pub fn usage(mut self, usage: Option<(String, Option<Usage>)>) -> Self {
-        self.usage = usage;
+    /// The settings popover shows the gauges of the resource use in `usage`.
+    pub fn usage(mut self, usage: Entity<UsageStore>) -> Self {
+        self.usage = Some(usage);
         self
     }
 
@@ -250,42 +247,6 @@ impl Sidebar {
             )
     }
 
-    /// The CPU, memory, and disk use of the VM of the current machine.
-    /// Before the first read ends, the card shows placeholders.
-    fn render_usage(&self, cx: &App) -> Option<impl IntoElement> {
-        let (name, u) = self.usage.as_ref()?;
-        let t = cx.theme();
-        let fraction = |used: u64, total: u64| if total == 0 { 0. } else { used as f32 / total as f32 };
-        let of = |used: u64, total: u64| format!("{} of {}", format_bytes(used), format_bytes(total));
-        let cpu = u.map(|u| {
-            let cpus = if u.cpus == 1 { "1 CPU".to_string() } else { format!("{} CPUs", u.cpus) };
-            (u.cpu_percent / 100., format!("{:.0}% of {cpus}", u.cpu_percent))
-        });
-        let mem = u.map(|u| (fraction(u.mem_used, u.mem_total), of(u.mem_used, u.mem_total)));
-        let disk = u.map(|u| (fraction(u.disk_used, u.disk_total), of(u.disk_used, u.disk_total)));
-        Some(
-            v_flex()
-                .mx_2p5()
-                .mb_2()
-                .p_2p5()
-                .gap_2()
-                .rounded(px(10.))
-                .bg(t.sidebar_accent.opacity(0.35))
-                .child(
-                    h_flex()
-                        .gap_1p5()
-                        .text_size(px(text::SUBHEADLINE))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(t.muted_foreground)
-                        .child(Icon::new(IconName::Server).xsmall())
-                        .child(div().min_w_0().truncate().child(name.clone())),
-                )
-                .child(gauge("CPU", cpu, cx))
-                .child(gauge("Memory", mem, cx))
-                .child(gauge("Disk", disk, cx)),
-        )
-    }
-
     fn render_machine(&self, ix: usize, machine: &Machine, cx: &App) -> impl IntoElement {
         let t = cx.theme();
         let running = machine.is_running();
@@ -346,8 +307,13 @@ impl RenderOnce for Sidebar {
                             .map(|(ix, m)| self.render_machine(ix, m, cx)),
                     ),
             )
-            .children(self.render_usage(cx))
-            .child(h_flex().flex_shrink_0().px_2p5().pb_2p5().child(settings::settings_button(cx)));
+            .child(
+                h_flex()
+                    .flex_shrink_0()
+                    .px_2p5()
+                    .pb_2p5()
+                    .child(settings::settings_button(self.usage.clone(), cx)),
+            );
         div()
             .relative()
             .w(self.width + px(2. * SIDEBAR_INSET))
@@ -357,69 +323,4 @@ impl RenderOnce for Sidebar {
             .bg(t.background)
             .child(panel)
     }
-}
-
-/// A gauge: a label and a value, with a bar below. The bar turns yellow
-/// above 75% and red above 90%. A `None` reading shows placeholders of the
-/// same size, so the card does not change height when the reading arrives.
-fn gauge(label: &'static str, reading: Option<(f32, String)>, cx: &App) -> Div {
-    let t = cx.theme();
-    let value = match &reading {
-        Some((_, value)) => div()
-            .min_w_0()
-            .truncate()
-            .font_features(tabular_nums())
-            .text_color(t.muted_foreground)
-            .child(value.clone())
-            .into_any_element(),
-        None => placeholder("value", div().w(px(72.)).h(px(10.)).rounded_sm(), cx).into_any_element(),
-    };
-    let bar = match reading {
-        Some((fraction, _)) => {
-            let fraction = fraction.clamp(0., 1.);
-            let color = if fraction > 0.9 {
-                t.red
-            } else if fraction > 0.75 {
-                t.yellow
-            } else {
-                native::accent(cx)
-            };
-            div()
-                .h(px(4.))
-                .w_full()
-                .rounded_full()
-                .bg(gauge_track(cx))
-                .child(div().h_full().w(relative(fraction)).rounded_full().bg(color))
-                .into_any_element()
-        }
-        None => placeholder("bar", div().w_full().h(px(4.)).rounded_full(), cx).into_any_element(),
-    };
-    v_flex()
-        .gap_1()
-        .child(
-            h_flex()
-                .justify_between()
-                .items_center()
-                .gap_2()
-                .text_size(px(text::SUBHEADLINE))
-                .child(div().text_color(t.sidebar_foreground).child(label))
-                .child(value),
-        )
-        .child(bar)
-}
-
-/// The color of the empty part of a gauge bar.
-fn gauge_track(cx: &App) -> Hsla {
-    cx.theme().muted_foreground.opacity(0.2)
-}
-
-/// Makes `shape` pulse in the color of the gauge track, in place of a
-/// value that has not arrived. The theme skeleton color is too dark on the
-/// sidebar card.
-fn placeholder(id: &'static str, shape: Div, cx: &App) -> AnimationElement<Div> {
-    shape.bg(gauge_track(cx)).with_animation(
-        id,
-        Animation::new(Duration::from_secs(2)).repeat().with_easing(bounce(ease_in_out)),
-        |d, delta| d.opacity(1. - delta * 0.5),
-    )
 }

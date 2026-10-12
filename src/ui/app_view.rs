@@ -1525,10 +1525,7 @@ impl Render for AppView {
                 let _ = view.update(cx, |this, cx| this.new_machine(true, window, cx));
             }
         })
-        .usage({
-            let u = self.usage.read(cx);
-            u.profile().map(|p| (p.to_string(), u.usage))
-        })
+        .usage(self.usage.clone())
         .cursor(
             self.sidebar_focus.is_focused(window).then_some(self.sidebar_cursor),
             self.sidebar_bounds.clone(),
