@@ -26,6 +26,7 @@ fn main() {
     tracing::debug!("process start");
     let backend = runtime::Backend::new();
     let early = state::container_store::EarlyConnect::start(&backend);
+    std::thread::spawn(colima::link_buildx);
 
     let app = gpui_platform::application().with_assets(assets::Assets);
     // The close button only hides the window. A click on the Dock icon

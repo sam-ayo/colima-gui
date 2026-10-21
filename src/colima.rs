@@ -39,6 +39,51 @@ fn bundled_tools() -> Option<PathBuf> {
     dir.is_dir().then_some(dir)
 }
 
+/// Makes the Buildx plugin in the app bundle available to `docker`, when no
+/// other Buildx is installed. Without Buildx, Compose uses the classic
+/// builder, which builds each service separately and is slower. The link
+/// goes in the plugin folder of the user (`~/.docker/cli-plugins`), because
+/// that folder needs no administrator password. A link that already exists
+/// stays, unless it points into an app bundle and is broken. Call this on a
+/// blocking thread.
+pub fn link_buildx() {
+    let Some(plugin) = bundled_tools().and_then(|bin| Some(bin.parent()?.join("cli-plugins/docker-buildx"))) else {
+        return;
+    };
+    let has_buildx = Command::new("docker")
+        .args(["buildx", "version"])
+        .env("PATH", search_path())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    if has_buildx || !plugin.is_file() {
+        return;
+    }
+    let Some(config) = std::env::var_os("DOCKER_CONFIG")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".docker")))
+    else {
+        return;
+    };
+    let link = config.join("cli-plugins/docker-buildx");
+    if let Ok(target) = std::fs::read_link(&link) {
+        // A broken link from an app that moved or that the user deleted.
+        let ours = target.to_string_lossy().contains(".app/Contents/Resources/tools/");
+        if !ours || link.exists() {
+            return;
+        }
+        let _ = std::fs::remove_file(&link);
+    } else if link.symlink_metadata().is_ok() {
+        return;
+    }
+    let result = std::fs::create_dir_all(config.join("cli-plugins"))
+        .and_then(|()| std::os::unix::fs::symlink(&plugin, &link));
+    if let Err(err) = result {
+        tracing::warn!("could not link {}: {err}", link.display());
+    }
+}
+
 /// Returns the Docker socket that `colima status --json` reports.
 pub fn docker_socket() -> Option<String> {
     let out = colima()

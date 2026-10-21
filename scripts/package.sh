@@ -2,7 +2,7 @@
 # Builds "Colima GUI.app" and an installer package (.pkg) for macOS.
 #
 # The app contains the Colima, Lima, Docker, and Docker Compose command line
-# tools. The installer puts the app in /Applications. It then links the tools
+# tools, and the Docker Buildx plugin. The installer puts the app in /Applications. It then links the tools
 # into /usr/local/bin, but only for tools that are not already installed.
 #
 # Usage: scripts/package.sh [arm64 | x86_64]
@@ -30,14 +30,15 @@ COLIMA_VERSION=0.10.3
 LIMA_VERSION=2.2.0
 DOCKER_VERSION=29.8.1
 COMPOSE_VERSION=5.5.1
+BUILDX_VERSION=0.38.1
 
 APP_NAME="Colima GUI"
 BUNDLE_ID=colima-gui
 
 arch="${1:-$(uname -m)}"
 case "$arch" in
-    arm64) rust_target=aarch64-apple-darwin; colima_arch=arm64; lima_arch=arm64; docker_arch=aarch64 ;;
-    x86_64) rust_target=x86_64-apple-darwin; colima_arch=x86_64; lima_arch=x86_64; docker_arch=x86_64 ;;
+    arm64) rust_target=aarch64-apple-darwin; colima_arch=arm64; lima_arch=arm64; docker_arch=aarch64; buildx_arch=arm64 ;;
+    x86_64) rust_target=x86_64-apple-darwin; colima_arch=x86_64; lima_arch=x86_64; docker_arch=x86_64; buildx_arch=amd64 ;;
     *) echo "unknown architecture: $arch" >&2; exit 1 ;;
 esac
 
@@ -99,9 +100,17 @@ fetch "$compose_url/$compose_file" "$compose_file-$COMPOSE_VERSION"
 fetch "$compose_url/checksums.txt" "compose-$COMPOSE_VERSION-checksums.txt"
 verify "$cache/$compose_file-$COMPOSE_VERSION" "$cache/compose-$COMPOSE_VERSION-checksums.txt" "$compose_file"
 
+# The macOS sums are only in the signed sums file. The plain sums file has
+# no macOS lines.
+buildx_file="buildx-v$BUILDX_VERSION.darwin-$buildx_arch"
+buildx_url="https://github.com/docker/buildx/releases/download/v$BUILDX_VERSION"
+fetch "$buildx_url/$buildx_file" "$buildx_file"
+fetch "$buildx_url/checksums-signed.txt" "buildx-$BUILDX_VERSION-checksums-signed.txt"
+verify "$cache/$buildx_file" "$cache/buildx-$BUILDX_VERSION-checksums-signed.txt" "$buildx_file"
+
 app="$out/$APP_NAME.app"
 tools="$app/Contents/Resources/tools"
-mkdir -p "$app/Contents/MacOS" "$tools/bin"
+mkdir -p "$app/Contents/MacOS" "$tools/bin" "$tools/cli-plugins"
 
 cp "$target/$rust_target/release/colima-gui" "$app/Contents/MacOS/colima-gui"
 cp "$root/assets/icon/colima-gui.icns" "$app/Contents/Resources/colima-gui.icns"
@@ -147,6 +156,10 @@ install -m 755 "$cache/docker/docker" "$tools/bin/docker"
 # The standalone name. The app runs `docker-compose` when the `docker
 # compose` plugin is not installed (see src/docker/compose.rs).
 install -m 755 "$cache/$compose_file-$COMPOSE_VERSION" "$tools/bin/docker-compose"
+# Compose builds with BuildKit only when `docker buildx` is installed. The
+# app links this plugin for the user when no other buildx is installed (see
+# `link_buildx` in src/colima.rs).
+install -m 755 "$cache/$buildx_file" "$tools/cli-plugins/docker-buildx"
 
 cat > "$app/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
