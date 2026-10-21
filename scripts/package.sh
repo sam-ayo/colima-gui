@@ -312,7 +312,26 @@ if [ -n "${INSTALLER_IDENTITY:-}" ] && [ ${#notary_args[@]} -gt 0 ]; then
         echo "notarization failed" >&2
         exit 1
     fi
-    xcrun stapler staple "$pkg"
+    # The staple step downloads the ticket from Apple. On 2026-10-21 this
+    # download failed two times on the GitHub runner ("The network connection
+    # was lost"), and the same package passed on a Mac. A package without a
+    # stapled ticket is still notarized, and Gatekeeper gets the ticket
+    # online. Thus try again, and then continue with a warning. The spctl
+    # step makes sure that Gatekeeper accepts the package.
+    stapled=no
+    for attempt in 1 2 3 4 5; do
+        if xcrun stapler staple "$pkg"; then
+            stapled=yes
+            break
+        fi
+        echo "staple attempt $attempt failed" >&2
+        if [ "$attempt" -lt 5 ]; then
+            sleep 30
+        fi
+    done
+    if [ "$stapled" = no ]; then
+        echo "::warning::the package is notarized, but has no stapled ticket" >&2
+    fi
     spctl --assess --type install --verbose "$pkg"
 fi
 
