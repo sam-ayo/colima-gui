@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use anyhow::{Context as _, Result, bail};
 use bollard::Docker;
@@ -171,11 +171,10 @@ pub fn run(socket: &str, project: &Project, action: ComposeAction, mut on_progre
     }
     let (program, prefix) = cli()?;
     for step in action.steps() {
-        let mut cmd = Command::new(program);
+        let mut cmd = crate::colima::tool(program);
         cmd.args(prefix)
             .args(project.args())
             .args(*step)
-            .env("PATH", crate::colima::search_path())
             .env("DOCKER_HOST", socket)
             // A context would select a different engine than `DOCKER_HOST`.
             .env_remove("DOCKER_CONTEXT")
@@ -210,9 +209,8 @@ pub fn run(socket: &str, project: &Project, action: ComposeAction, mut on_progre
 /// standalone `docker-compose`.
 fn cli() -> Result<(&'static str, &'static [&'static str])> {
     let works = |program: &str, args: &[&str]| {
-        Command::new(program)
+        crate::colima::tool(program)
             .args(args)
-            .env("PATH", crate::colima::search_path())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()

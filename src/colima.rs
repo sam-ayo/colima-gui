@@ -15,9 +15,29 @@ struct Status {
 /// `colima` and the tools it calls (`limactl`, `docker`) are found. The
 /// tools in the app bundle come last, so an installed Colima has priority.
 fn colima() -> Command {
-    let mut cmd = Command::new("colima");
-    cmd.env("PATH", search_path());
-    cmd
+    tool("colima")
+}
+
+/// A command for the CLI tool `name`, with the PATH of `search_path`. The
+/// command has the full path of the tool. With a bare name and a changed
+/// PATH, `std` cannot use `posix_spawn` and uses `fork`. A child that forks
+/// while AppKit starts can crash, and macOS then shows a crash alert. If
+/// the tool is not found, the command keeps the bare name and the PATH of
+/// the app, so the spawn fails without a fork.
+pub fn tool(name: &str) -> Command {
+    use std::os::unix::fs::PermissionsExt as _;
+    let path = search_path();
+    let found = std::env::split_paths(&path)
+        .map(|dir| dir.join(name))
+        .find(|p| std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0));
+    match found {
+        Some(program) => {
+            let mut cmd = Command::new(program);
+            cmd.env("PATH", path);
+            cmd
+        }
+        None => Command::new(name),
+    }
 }
 
 /// The PATH for the CLI tools that the app runs. See `colima`.
@@ -50,9 +70,8 @@ pub fn link_buildx() {
     let Some(plugin) = bundled_tools().and_then(|bin| Some(bin.parent()?.join("cli-plugins/docker-buildx"))) else {
         return;
     };
-    let has_buildx = Command::new("docker")
+    let has_buildx = tool("docker")
         .args(["buildx", "version"])
-        .env("PATH", search_path())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
