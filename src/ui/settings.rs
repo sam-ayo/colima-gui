@@ -253,13 +253,12 @@ fn window_picture(p: &Palette, sidebar: bool, accent: Hsla) -> Div {
         )
 }
 
-/// The swatches of all the accent colors. A gap keeps `System` apart from
-/// the fixed colors, as the separator does in the menu.
+/// The swatches of all the accent colors, in one row, with the same gap
+/// between each.
 fn swatches(current: AccentColor, cx: &App) -> Div {
     h_flex()
         .gap(px(SWATCH / 3.))
         .child(swatch(AccentColor::System, current, cx))
-        .child(div().w(px(2.)))
         .children(AccentColor::COLORS.map(|c| swatch(c, current, cx)))
 }
 

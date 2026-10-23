@@ -38,35 +38,47 @@ pub const APP_NAME: &str = "Colima GUI";
 #[derive(Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 pub enum AccentColor {
     System,
-    Purple,
-    Pink,
-    Orange,
-    Green,
+    Rose,
+    Forest,
+    Paper,
+    Graphite,
+    Indigo,
     #[default]
     Teal,
-    Blue,
+    Lavender,
 }
 
 impl AccentColor {
-    pub const COLORS: [AccentColor; 6] = [
-        AccentColor::Purple,
-        AccentColor::Pink,
-        AccentColor::Orange,
-        AccentColor::Green,
+    pub const COLORS: [AccentColor; 7] = [
+        AccentColor::Rose,
+        AccentColor::Forest,
+        AccentColor::Paper,
+        AccentColor::Graphite,
+        AccentColor::Indigo,
         AccentColor::Teal,
-        AccentColor::Blue,
+        AccentColor::Lavender,
     ];
 
     /// The menu label. The saved setting also uses it.
     pub fn name(self) -> &'static str {
         match self {
             AccentColor::System => "System",
-            AccentColor::Purple => "Purple",
-            AccentColor::Pink => "Pink",
-            AccentColor::Orange => "Orange",
-            AccentColor::Green => "Green",
+            AccentColor::Rose => "Rose",
+            AccentColor::Forest => "Forest",
+            AccentColor::Paper => "Paper",
+            AccentColor::Graphite => "Graphite",
+            AccentColor::Indigo => "Indigo",
             AccentColor::Teal => "Teal",
-            AccentColor::Blue => "Blue",
+            AccentColor::Lavender => "Lavender",
+        }
+    }
+
+    /// The hue and the saturation of the window fills, when they do not
+    /// come from the accent color. Paper has warm, cream fills.
+    fn surface_tint(self) -> Option<(f32, f32)> {
+        match self {
+            AccentColor::Paper => Some((40. / 360., 0.9)),
+            _ => None,
         }
     }
 
@@ -144,7 +156,8 @@ pub fn sync_theme(window: &mut Window, cx: &mut App) {
     let Some(c) = platform::system_colors(dark, choice) else {
         return;
     };
-    let s = Surfaces::new(c.accent, dark);
+    let (hue, saturation) = choice.surface_tint().unwrap_or((c.accent.h, c.accent.s.min(1.)));
+    let s = Surfaces::new(hue, saturation, dark);
     // The system separator is pure black or pure white with an alpha. Keep
     // its alpha, but use the tinted base, as the other fills do.
     let over = if dark { s.paper } else { s.ink };
@@ -212,8 +225,8 @@ pub fn sync_theme(window: &mut Window, cx: &mut App) {
 }
 
 /// The fills of the window, the sidebar, and the tiles. Pure white and pure
-/// black look flat, so each fill has a small tint of the accent hue. A gray
-/// accent, such as Graphite, gives neutral grays.
+/// black look flat, so each fill has a small tint of a hue, usually the
+/// accent hue. A gray accent, such as Graphite, gives neutral grays.
 struct Surfaces {
     background: Hsla,
     sidebar: Hsla,
@@ -229,8 +242,8 @@ struct Surfaces {
 }
 
 impl Surfaces {
-    fn new(accent: Hsla, dark: bool) -> Self {
-        let tint = |s: f32, l: f32| hsla(accent.h, s * accent.s.min(1.), l, 1.);
+    fn new(hue: f32, saturation: f32, dark: bool) -> Self {
+        let tint = |s: f32, l: f32| hsla(hue, s * saturation, l, 1.);
         let paper = tint(0.45, 0.99);
         let ink = tint(0.40, 0.12);
         if dark {
@@ -825,18 +838,24 @@ mod platform {
         (alert.runModal() == NSAlertFirstButtonReturn).then(|| field.stringValue().to_string())
     }
 
-    /// The system color of an accent color choice. `System` has no color
-    /// here, because it uses the accent colors of AppKit.
-    fn accent_color(choice: AccentColor) -> Option<Retained<NSColor>> {
-        Some(match choice {
-            AccentColor::System => return None,
-            AccentColor::Purple => NSColor::systemPurpleColor(),
-            AccentColor::Pink => NSColor::systemPinkColor(),
-            AccentColor::Orange => NSColor::systemOrangeColor(),
-            AccentColor::Green => NSColor::systemGreenColor(),
-            AccentColor::Teal => NSColor::systemTealColor(),
-            AccentColor::Blue => NSColor::systemBlueColor(),
-        })
+    /// The color of an accent color choice in the current drawing
+    /// appearance. `System` has no color here, because it uses the accent
+    /// colors of AppKit. The themes with no system color have a light and a
+    /// dark variant here. White text stays legible on each variant.
+    fn accent_color(choice: AccentColor, dark: bool) -> Option<Hsla> {
+        let custom = |h: f32, s: f32, light: f32, dark_l: f32| {
+            Some(gpui::hsla(h / 360., s, if dark { dark_l } else { light }, 1.))
+        };
+        match choice {
+            AccentColor::System => None,
+            AccentColor::Rose => custom(345., 0.62, 0.52, 0.58),
+            AccentColor::Forest => custom(150., 0.45, 0.34, 0.42),
+            AccentColor::Paper => custom(28., 0.45, 0.42, 0.48),
+            AccentColor::Graphite => custom(0., 0., 0.45, 0.5),
+            AccentColor::Indigo => Some(hsla(&NSColor::systemIndigoColor())),
+            AccentColor::Teal => Some(hsla(&NSColor::systemTealColor())),
+            AccentColor::Lavender => custom(262., 0.52, 0.58, 0.64),
+        }
     }
 
     pub(super) fn system_colors(dark: bool, choice: AccentColor) -> Option<SystemColors> {
@@ -850,9 +869,8 @@ mod platform {
             // The system colors have a light and a dark variant. A chosen
             // color also fills the selected rows, the text selection, and
             // the links.
-            let (accent, selection, text_selection, link) = match accent_color(choice) {
-                Some(color) => {
-                    let accent = hsla(&color);
+            let (accent, selection, text_selection, link) = match accent_color(choice, dark) {
+                Some(accent) => {
                     (accent, accent, accent.opacity(if dark { 0.45 } else { 0.3 }), accent)
                 }
                 None => (
