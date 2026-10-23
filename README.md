@@ -9,8 +9,9 @@ your containers, volumes, images, and machines.
 
 | | |
 | --- | --- |
-| ![Purple, light](docs/screenshots/theme-purple-light.png) | ![Blue, dark](docs/screenshots/theme-blue-dark.png) |
-| ![Green, light](docs/screenshots/theme-green-light.png) | ![Orange, dark](docs/screenshots/theme-orange-dark.png) |
+| ![Rose, light](docs/screenshots/theme-rose-light.png) | ![Forest, dark](docs/screenshots/theme-forest-dark.png) |
+| ![Paper, light](docs/screenshots/theme-paper-light.png) | ![Graphite, dark](docs/screenshots/theme-graphite-dark.png) |
+| ![Indigo, light](docs/screenshots/theme-indigo-light.png) | ![Lavender, dark](docs/screenshots/theme-lavender-dark.png) |
 
 ## Build
 
