@@ -250,8 +250,9 @@ pub enum StoreEvent {
     /// stream connected again.
     NetworksChanged,
     Error(String),
-    /// The VM of this profile cannot find hosts. See `colima::vm_dns_fails`.
-    DnsFails(String),
+    /// The result of a DNS check in the VM of this profile. See
+    /// `colima::vm_dns_fails`.
+    Dns { profile: String, works: bool },
     Compose(ComposeEvent),
 }
 
@@ -793,15 +794,15 @@ impl ContainerStore {
         .detach();
     }
 
-    /// Tells the app if the VM of a running profile cannot find hosts.
+    /// Tells the app if the VM of a running profile can find hosts.
     fn check_dns(&mut self, profile: String, cx: &mut Context<Self>) {
         let rx = Backend::global(cx).spawn({
             let profile = profile.clone();
             async move { tokio::task::spawn_blocking(move || crate::colima::vm_dns_fails(&profile)).await }
         });
         cx.spawn(async move |this, cx| {
-            if matches!(rx.await, Ok(Ok(true))) {
-                let _ = this.update(cx, |_, cx| cx.emit(StoreEvent::DnsFails(profile)));
+            if let Ok(Ok(fails)) = rx.await {
+                let _ = this.update(cx, |_, cx| cx.emit(StoreEvent::Dns { profile, works: !fails }));
             }
         })
         .detach();

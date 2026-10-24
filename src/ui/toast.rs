@@ -163,7 +163,6 @@ pub fn copy(text: String, description: impl Into<SharedString>, cx: &mut App) {
 }
 
 /// Removes the toast with `id`.
-#[allow(dead_code)]
 pub fn dismiss(id: &str, cx: &mut App) {
     if let Some(handle) = cx.try_global::<ToasterHandle>() {
         handle.0.clone().update(cx, |t, cx| t.dismiss(id, cx));

@@ -18,8 +18,9 @@ pub enum MachineEvent {
     Error(String),
     /// The engine of this profile answers. `colima start` can still run.
     Ready(String),
-    /// The VM of this profile cannot find hosts. See `colima::vm_dns_fails`.
-    DnsFails(String),
+    /// The result of a DNS check in the VM of this profile. See
+    /// `colima::vm_dns_fails`.
+    Dns { profile: String, works: bool },
 }
 
 pub struct MachineStore {
@@ -125,15 +126,15 @@ impl MachineStore {
         self.run_job(name, true, true, move || colima::configure(&profile, &old, &new, running), cx);
     }
 
-    /// Tells the app if the VM of a running profile cannot find hosts.
+    /// Tells the app if the VM of a running profile can find hosts.
     fn check_dns(&mut self, profile: String, cx: &mut Context<Self>) {
         let rx = Backend::global(cx).spawn({
             let profile = profile.clone();
             async move { tokio::task::spawn_blocking(move || colima::vm_dns_fails(&profile)).await }
         });
         cx.spawn(async move |this, cx| {
-            if matches!(rx.await, Ok(Ok(true))) {
-                let _ = this.update(cx, |_, cx| cx.emit(MachineEvent::DnsFails(profile)));
+            if let Ok(Ok(fails)) = rx.await {
+                let _ = this.update(cx, |_, cx| cx.emit(MachineEvent::Dns { profile, works: !fails }));
             }
         })
         .detach();

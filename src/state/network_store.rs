@@ -166,7 +166,7 @@ impl NetworkStore {
                     this.reload(cx);
                 }
             }
-            StoreEvent::VolumesChanged | StoreEvent::ImagesChanged | StoreEvent::Error(_) | StoreEvent::DnsFails(_) | StoreEvent::Compose(_) => {}
+            StoreEvent::VolumesChanged | StoreEvent::ImagesChanged | StoreEvent::Error(_) | StoreEvent::Dns { .. } | StoreEvent::Compose(_) => {}
         })];
         NetworkStore {
             containers,

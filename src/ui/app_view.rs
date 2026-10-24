@@ -108,14 +108,19 @@ const SIDEBAR_SPRING_EPSILON: f32 = 0.5;
 const DETAIL_SPRING_EPSILON: f32 = 0.001;
 
 /// Tells the user that the VM of a profile cannot find hosts, so image
-/// pulls fail. The toast stays until the user restarts the machine or
-/// closes the toast. A restart checks the DNS again.
-fn show_dns_toast(profile: &str, machines: &Entity<MachineStore>, cx: &mut App) {
+/// pulls fail. The toast stays until a later check finds hosts, or the
+/// user closes it. A restart checks the DNS again.
+fn show_dns_toast(profile: &str, works: bool, machines: &Entity<MachineStore>, cx: &mut App) {
+    let id = format!("dns:{profile}");
+    if works {
+        toast::dismiss(&id, cx);
+        return;
+    }
     let machines = machines.downgrade();
     let name = profile.to_string();
     let toast = Toast::warning(format!("“{profile}” cannot find hosts on the internet"))
         .description("Image pulls will fail. A restart often fixes this after a change to the network or the VPN.")
-        .id(format!("dns:{profile}"))
+        .id(id)
         .action("Restart", move |cx| {
             let _ = machines.update(cx, |m, cx| m.run(&name, MachineAction::Restart, cx));
         })
@@ -331,7 +336,7 @@ impl AppView {
                 MachineEvent::Error(msg) => {
                     toast::show(Toast::error(msg.clone()), cx)
                 }
-                MachineEvent::DnsFails(profile) => show_dns_toast(profile, &this.machines, cx),
+                MachineEvent::Dns { profile, works } => show_dns_toast(profile, *works, &this.machines, cx),
                 MachineEvent::Ready(profile) => {
                     if this.store.read(cx).profile() == Some(profile.as_str()) {
                         this.store.update(cx, |s, cx| s.wake(cx));
@@ -342,7 +347,7 @@ impl AppView {
                 StoreEvent::Error(msg) => {
                     toast::show(Toast::error(msg.clone()), cx)
                 }
-                StoreEvent::DnsFails(profile) => show_dns_toast(profile, &this.machines, cx),
+                StoreEvent::Dns { profile, works } => show_dns_toast(profile, *works, &this.machines, cx),
                 StoreEvent::Compose(ev) => show_compose_toast(ev, cx),
                 StoreEvent::VolumesChanged | StoreEvent::ImagesChanged | StoreEvent::NetworksChanged => {}
                 StoreEvent::Changed => {
