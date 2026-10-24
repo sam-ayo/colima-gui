@@ -72,13 +72,21 @@ pub struct Toast {
     id: Option<SharedString>,
     /// `None` keeps the toast until the user removes it.
     duration: Option<Duration>,
+    action: Option<ToastAction>,
+}
+
+/// A button in the toast. A click runs the handler and closes the toast.
+#[derive(Clone)]
+struct ToastAction {
+    label: SharedString,
+    handler: Rc<dyn Fn(&mut App)>,
 }
 
 #[allow(dead_code)]
 impl Toast {
     pub fn new(kind: ToastKind, title: impl Into<SharedString>) -> Self {
         let duration = (kind != ToastKind::Loading).then_some(DURATION);
-        Self { kind, title: title.into(), description: None, id: None, duration }
+        Self { kind, title: title.into(), description: None, id: None, duration, action: None }
     }
 
     pub fn message(title: impl Into<SharedString>) -> Self {
@@ -123,6 +131,11 @@ impl Toast {
         self
     }
 
+    pub fn action(mut self, label: impl Into<SharedString>, handler: impl Fn(&mut App) + 'static) -> Self {
+        self.action = Some(ToastAction { label: label.into(), handler: Rc::new(handler) });
+        self
+    }
+
     /// Keeps the toast until the user removes it.
     pub fn persist(mut self) -> Self {
         self.duration = None;
@@ -150,7 +163,6 @@ pub fn copy(text: String, description: impl Into<SharedString>, cx: &mut App) {
 }
 
 /// Removes the toast with `id`.
-#[allow(dead_code)]
 pub fn dismiss(id: &str, cx: &mut App) {
     if let Some(handle) = cx.try_global::<ToasterHandle>() {
         handle.0.clone().update(cx, |t, cx| t.dismiss(id, cx));
@@ -640,6 +652,23 @@ impl Toaster {
                         )
                     }),
             )
+            .when_some(e.toast.action.clone().filter(|_| interactive), |d, action| {
+                d.child(
+                    div()
+                        .flex_shrink_0()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(
+                            Button::new(("toast-action", key))
+                                .label(action.label.clone())
+                                .outline()
+                                .xsmall()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    (action.handler)(cx);
+                                    this.close(key, cx);
+                                })),
+                        ),
+                )
+            })
             .when(interactive, |d| {
                 d.child(
                     div()

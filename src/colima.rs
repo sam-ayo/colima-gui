@@ -602,6 +602,26 @@ pub fn ssh_in_terminal(profile: &str) -> Result<()> {
     Ok(())
 }
 
+/// The host that the DNS check finds. Docker pulls images from it.
+const DNS_CHECK_HOST: &str = "registry-1.docker.io";
+
+/// True if the Mac finds `DNS_CHECK_HOST` and the VM of a profile does not.
+/// Then the DNS forwarder of Lima does not answer, for example after a
+/// change to the network of the Mac. If the Mac finds no host either, the
+/// Mac is offline, and the check returns false.
+pub fn vm_dns_fails(profile: &str) -> bool {
+    use std::net::ToSocketAddrs as _;
+    if (DNS_CHECK_HOST, 443).to_socket_addrs().is_err() {
+        return false;
+    }
+    colima()
+        .args(["ssh", "--profile", profile, "--", "timeout", "10", "getent", "hosts", DNS_CHECK_HOST])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| !s.success())
+}
+
 /// The kind of an entry in a folder.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EntryKind {
