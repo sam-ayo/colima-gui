@@ -250,6 +250,8 @@ pub enum StoreEvent {
     /// stream connected again.
     NetworksChanged,
     Error(String),
+    /// The VM of this profile cannot find hosts. See `colima::vm_dns_fails`.
+    DnsFails(String),
     Compose(ComposeEvent),
 }
 
@@ -740,6 +742,8 @@ impl ContainerStore {
         let done = Arc::new(AtomicBool::new(false));
         let backend = Backend::global(cx);
         let profile = self.profile().map(str::to_string);
+        // `colima start` without a profile starts the default profile.
+        let dns_profile = profile.clone().unwrap_or_else(|| "default".into());
         let rx = backend.spawn({
             let done = done.clone();
             async move {
@@ -773,8 +777,9 @@ impl ContainerStore {
             let result = rx.await.unwrap_or_else(|_| Err(anyhow::anyhow!("cancelled")));
             let _ = this.update(cx, |this, cx| {
                 this.starting_colima = false;
-                if let Err(e) = result {
-                    cx.emit(StoreEvent::Error(e.to_string()));
+                match result {
+                    Err(e) => cx.emit(StoreEvent::Error(e.to_string())),
+                    Ok(()) => this.check_dns(dns_profile, cx),
                 }
                 if this.status != EngineStatus::Connected {
                     // An events pump that exists reconnects by itself.
@@ -784,6 +789,20 @@ impl ContainerStore {
                 }
                 this.changed(cx);
             });
+        })
+        .detach();
+    }
+
+    /// Tells the app if the VM of a running profile cannot find hosts.
+    fn check_dns(&mut self, profile: String, cx: &mut Context<Self>) {
+        let rx = Backend::global(cx).spawn({
+            let profile = profile.clone();
+            async move { tokio::task::spawn_blocking(move || crate::colima::vm_dns_fails(&profile)).await }
+        });
+        cx.spawn(async move |this, cx| {
+            if matches!(rx.await, Ok(Ok(true))) {
+                let _ = this.update(cx, |_, cx| cx.emit(StoreEvent::DnsFails(profile)));
+            }
         })
         .detach();
     }

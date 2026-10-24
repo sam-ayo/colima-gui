@@ -198,7 +198,7 @@ impl VolumeStore {
                     this.reload(cx);
                 }
             }
-            StoreEvent::ImagesChanged | StoreEvent::NetworksChanged | StoreEvent::Error(_) | StoreEvent::Compose(_) => {}
+            StoreEvent::ImagesChanged | StoreEvent::NetworksChanged | StoreEvent::Error(_) | StoreEvent::DnsFails(_) | StoreEvent::Compose(_) => {}
         })];
         VolumeStore {
             containers,

@@ -18,6 +18,8 @@ pub enum MachineEvent {
     Error(String),
     /// The engine of this profile answers. `colima start` can still run.
     Ready(String),
+    /// The VM of this profile cannot find hosts. See `colima::vm_dns_fails`.
+    DnsFails(String),
 }
 
 pub struct MachineStore {
@@ -123,6 +125,20 @@ impl MachineStore {
         self.run_job(name, true, true, move || colima::configure(&profile, &old, &new, running), cx);
     }
 
+    /// Tells the app if the VM of a running profile cannot find hosts.
+    fn check_dns(&mut self, profile: String, cx: &mut Context<Self>) {
+        let rx = Backend::global(cx).spawn({
+            let profile = profile.clone();
+            async move { tokio::task::spawn_blocking(move || colima::vm_dns_fails(&profile)).await }
+        });
+        cx.spawn(async move |this, cx| {
+            if matches!(rx.await, Ok(Ok(true))) {
+                let _ = this.update(cx, |_, cx| cx.emit(MachineEvent::DnsFails(profile)));
+            }
+        })
+        .detach();
+    }
+
     /// Runs `job` for a profile. `starts` tells that the engine answers
     /// before the job ends, as with `colima start`. `leaves_running` tells
     /// that the engine runs when the job ends.
@@ -183,7 +199,10 @@ impl MachineStore {
                 this.running_cli.remove(&profile);
                 match result {
                     Err(e) => cx.emit(MachineEvent::Error(e.to_string())),
-                    Ok(()) if leaves_running => cx.emit(MachineEvent::Ready(profile.clone())),
+                    Ok(()) if leaves_running => {
+                        cx.emit(MachineEvent::Ready(profile.clone()));
+                        this.check_dns(profile.clone(), cx);
+                    }
                     Ok(()) => {}
                 }
                 this.refresh(cx);
